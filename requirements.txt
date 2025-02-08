@@ -1,0 +1,9 @@
+selenium==4.24.0
+beautifulsoup4==4.12.3
+jdatetime==5.0.0
+webdriver-manager==4.0.2
+aiohttp==3.11.12
+fastapi==0.115.8
+uvicorn==0.34.0
+pydantic==2.10.6
+pydantic-settings==2.7.1
