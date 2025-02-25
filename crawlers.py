@@ -116,5 +116,4 @@ class ISNACrawler(BaseCrawler):
         body = "\n".join(
             [p.get_text(strip=True) for p in body_tag.find_all("p") if p.get_text(strip=True)]
         )
-        print({"title": title, "body": body})
         return {"title": title, "body": body}
