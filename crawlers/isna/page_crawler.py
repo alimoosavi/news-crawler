@@ -128,60 +128,43 @@ class ISNAPageCrawler:
             if not article_data.get('title'):
                 raise Exception("No title found in article")
             
-            # Prepare data for database insertion
-            source = 'ISNA'
-            published_date = article_data.get('published_date')  # Now properly extracted Shamsi date
-            title = article_data.get('title')
-            summary = article_data.get('summary')
-            content = article_data.get('content')
-            tags = article_data.get('tags')  # List of tags
-            
-            # Insert into database with thread safety
+            # Store article data in database with thread-safe operation
             with self._db_lock:
-                try:
-                    # Insert news article
-                    news_id = self.db_manager.insert_news_article(
-                        source=source,
-                        published_date=published_date,  # Shamsi datetime string
-                        title=title,
-                        summary=summary,
-                        content=content,
-                        tags=tags,
-                        link_id=link_id
-                    )
-                    
-                    # Mark link as processed
-                    self.db_manager.mark_link_processed(link_id)
-                    
-                    result.update({
-                        'news_id': news_id,
-                        'success': True,
-                        'title': title,
-                        'published_date': published_date
-                    })
-                    
-                    self.logger.info(f"Successfully processed link {link_id}: {title[:50]}...")
-                    
-                except Exception as db_error:
-                    raise Exception(f"Database error: {str(db_error)}")
+                news_id = self.db_manager.insert_news_article(
+                    source='ISNA',
+                    published_date=article_data['published_date'],  # Now a datetime object
+                    title=article_data['title'],
+                    summary=article_data['summary'],
+                    content=article_data['content'],
+                    tags=article_data['tags'],
+                    link_id=link_id
+                )
+                
+                # Mark link as processed
+                self.db_manager.mark_link_processed(link_id)
+            
+            # Update result
+            result.update({
+                'news_id': news_id,
+                'success': True,
+                'title': article_data['title'],
+                'published_date': article_data['published_date']
+            })
+            
+            self.logger.info(f"✓ Successfully processed link {link_id}: {article_data['title'][:50]}...")
+            if article_data['published_date']:
+                self.logger.debug(f"📅 Published: {article_data['published_date']}")
             
         except Exception as e:
-            error_msg = f"Error crawling {url}: {str(e)}"
+            error_msg = f"Error crawling page: {str(e)}"
             result['error'] = error_msg
-            self.logger.error(error_msg)
+            self.logger.error(f"✗ Failed to process link {link_id}: {error_msg}")
             
-            # Mark link as processed even if failed to avoid infinite retries
-            try:
-                with self._db_lock:
-                    self.db_manager.mark_link_processed(link_id)
-            except Exception as mark_error:
-                self.logger.error(f"Failed to mark link {link_id} as processed: {str(mark_error)}")
-        
         return result
     
-    def crawl_unprocessed_links(self, source='ISNA', limit=50, max_workers=3):
+    def crawl_unprocessed_links(self, source='ISNA', limit=None, max_workers=3):
         """
-        Crawl multiple unprocessed links concurrently
+        Crawl unprocessed links concurrently
         
         Args:
             source: Source name to filter links
@@ -191,8 +174,6 @@ class ISNAPageCrawler:
         Returns:
             Dictionary with results and summary
         """
-        self.logger.info(f"Starting concurrent crawling of unprocessed {source} links")
-        
         # Get unprocessed links
         unprocessed_links = self.db_manager.get_unprocessed_links(source=source, limit=limit)
         
@@ -207,9 +188,8 @@ class ISNAPageCrawler:
                 }
             }
         
-        self.logger.info(f"Found {len(unprocessed_links)} unprocessed links")
+        self.logger.info(f"Processing {len(unprocessed_links)} unprocessed links with {max_workers} workers")
         
-        # Process links concurrently
         results = {}
         successful = 0
         failed = 0
@@ -231,9 +211,9 @@ class ISNAPageCrawler:
                     
                     if result['success']:
                         successful += 1
-                        self.logger.info(f"✓ Link {link_id}: {result['title']}")
+                        self.logger.info(f"✓ Link {link_id}: {result['title'][:50] if result['title'] else 'No title'}...")
                         if result['published_date']:
-                            self.logger.debug(f"  📅 Published: {result['published_date']}")
+                            self.logger.debug(f"📅 Published: {result['published_date']}")
                     else:
                         failed += 1
                         self.logger.error(f"✗ Link {link_id}: {result['error']}")

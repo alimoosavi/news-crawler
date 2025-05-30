@@ -3,6 +3,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import logging
 from config import settings
+import re
 
 class DatabaseManager:
     def __init__(self):
@@ -86,7 +87,7 @@ class DatabaseManager:
             raise
     
     def create_news_table(self):
-        """Create the news table based on your definition"""
+        """Create the news table with datetime published_date"""
         if self.table_exists('news'):
             self.logger.info("news table already exists")
             return True
@@ -95,36 +96,29 @@ class DatabaseManager:
         CREATE TABLE news (
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
-            published_date TEXT,
+            published_date TIMESTAMP,
             title TEXT,
             summary TEXT,
             content TEXT,
             tags TEXT[],
-            link_id INTEGER REFERENCES news_links(id) ON DELETE CASCADE,
+            link_id INTEGER REFERENCES news_links(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Create indexes for better performance and search capabilities
+        -- Create indexes for better performance
         CREATE INDEX idx_news_source ON news(source);
         CREATE INDEX idx_news_published_date ON news(published_date);
         CREATE INDEX idx_news_link_id ON news(link_id);
-        CREATE INDEX idx_news_created_at ON news(created_at);
-        
-        -- Full-text search indexes (requires PostgreSQL with text search support)
-        CREATE INDEX idx_news_title_fts ON news USING gin(to_tsvector('english', COALESCE(title, '')));
-        CREATE INDEX idx_news_content_fts ON news USING gin(to_tsvector('english', COALESCE(content, '')));
-        CREATE INDEX idx_news_summary_fts ON news USING gin(to_tsvector('english', COALESCE(summary, '')));
-        
-        -- GIN index for tags array
-        CREATE INDEX idx_news_tags ON news USING gin(tags);
+        CREATE INDEX idx_news_title ON news USING gin(to_tsvector('english', title));
+        CREATE INDEX idx_news_content ON news USING gin(to_tsvector('english', content));
         """
         
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute(create_table_query)
                 self.connection.commit()
-                self.logger.info("news table created successfully with indexes")
+                self.logger.info("news table created successfully with datetime published_date")
                 return True
         except Exception as e:
             self.logger.error(f"Error creating news table: {str(e)}")
@@ -132,40 +126,15 @@ class DatabaseManager:
             raise
     
     def create_tables_if_not_exist(self):
-        """Create all required tables if they don't exist"""
-        self.logger.info("Checking and creating tables if they don't exist...")
-        
-        tables_created = []
-        
+        """Create all tables if they don't exist"""
         try:
-            # Create news_links table first (referenced by news table)
-            if not self.table_exists('news_links'):
-                self.create_news_links_table()
-                tables_created.append('news_links')
-            else:
-                self.logger.info("news_links table already exists")
-            
-            # Create news table
-            if not self.table_exists('news'):
-                self.create_news_table()
-                tables_created.append('news')
-            else:
-                self.logger.info("news table already exists")
-            
-            if tables_created:
-                self.logger.info(f"Successfully created tables: {', '.join(tables_created)}")
-            else:
-                self.logger.info("All tables already exist")
-                
+            self.create_news_links_table()
+            self.create_news_table()
+            self.logger.info("All tables created successfully")
             return True
-            
         except Exception as e:
-            self.logger.error(f"Error in create_tables_if_not_exist: {str(e)}")
-            raise
-    
-    def create_all_tables(self):
-        """Alias for create_tables_if_not_exist for backward compatibility"""
-        return self.create_tables_if_not_exist()
+            self.logger.error(f"Error creating tables: {str(e)}")
+            return False
     
     def get_table_info(self, table_name):
         """Get detailed information about a table"""
@@ -190,29 +159,25 @@ class DatabaseManager:
             return []
     
     def get_database_schema_info(self):
-        """Get information about all tables in the database"""
+        """Get complete database schema information"""
         schema_info = {}
         
-        # Get list of tables
-        tables_query = """
-        SELECT table_name 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_type = 'BASE TABLE'
-        ORDER BY table_name;
-        """
-        
         try:
+            # Get all tables
+            tables_query = """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            ORDER BY table_name;
+            """
+            
             with self.connection.cursor() as cursor:
                 cursor.execute(tables_query)
                 tables = [row[0] for row in cursor.fetchall()]
             
             # Get info for each table
             for table in tables:
-                schema_info[table] = {
-                    'exists': True,
-                    'columns': self.get_table_info(table)
-                }
+                schema_info[table] = self.get_table_info(table)
             
             return schema_info
             
@@ -223,15 +188,15 @@ class DatabaseManager:
     def insert_news_link(self, source, link, date, title=None):
         """Insert a single news link into the database"""
         insert_query = """
-        INSERT INTO news_links (source, link, date, title, has_processed)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO news_links (source, link, date, title)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (link) DO NOTHING
         RETURNING id;
         """
         
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(insert_query, (source, link, date, title, False))
+                cursor.execute(insert_query, (source, link, date, title))
                 result = cursor.fetchone()
                 self.connection.commit()
                 
@@ -250,8 +215,8 @@ class DatabaseManager:
     def insert_news_links_batch(self, links_data):
         """Insert multiple news links in a batch"""
         insert_query = """
-        INSERT INTO news_links (source, link, date, title, has_processed)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO news_links (source, link, date, title)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (link) DO NOTHING;
         """
         
@@ -267,7 +232,7 @@ class DatabaseManager:
             raise
     
     def insert_news_article(self, source, published_date, title, summary, content, tags, link_id):
-        """Insert a news article into the database"""
+        """Insert a news article into the database with datetime published_date"""
         insert_query = """
         INSERT INTO news (source, published_date, title, summary, content, tags, link_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)

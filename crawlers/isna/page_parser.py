@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 import re
 from datetime import datetime
 import logging
+from utils.shamsi_converter import convert_shamsi_to_datetime
 
 # Configure logging for debugging in distributed systems
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +18,7 @@ def extract_news_article(html_content: str) -> Dict[str, Optional[str]]:
         
     Returns:
         Dict containing: published_date, title, summary, content, tags
-        Returns None for fields that couldn't be extracted
+        published_date will be a datetime object or None
     """
     result = {
         'published_date': None,
@@ -30,7 +31,7 @@ def extract_news_article(html_content: str) -> Dict[str, Optional[str]]:
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Extract published date from calendar icon structure
+        # Extract published date from calendar icon structure and convert to datetime
         result['published_date'] = _extract_published_date(soup)
         
         # Extract title from h1 with class "first-title"
@@ -53,11 +54,14 @@ def extract_news_article(html_content: str) -> Dict[str, Optional[str]]:
     
     return result
 
-def _extract_published_date(soup: BeautifulSoup) -> Optional[str]:
+def _extract_published_date(soup: BeautifulSoup) -> Optional[datetime]:
     """
-    Extract published date from the calendar icon structure.
+    Extract published date from the calendar icon structure and convert to datetime.
     
     Expected format: <li><i class="fa fa-calendar-o"></i> <span class="title-meta">جمعه /</span> <span class="text-meta">۹ خرداد ۱۴۰۴ / ۱۹:۳۱</span></li>
+    
+    Returns:
+        datetime object or None if extraction/conversion fails
     """
     try:
         # Look for the calendar icon and its parent li element
@@ -74,7 +78,14 @@ def _extract_published_date(soup: BeautifulSoup) -> Optional[str]:
                 if date_span:
                     date_text = date_span.get_text().strip()
                     logger.debug(f"Found date text: {date_text}")
-                    return date_text
+                    
+                    # Convert Shamsi string to datetime
+                    datetime_obj = convert_shamsi_to_datetime(date_text)
+                    if datetime_obj:
+                        logger.debug(f"Converted to datetime: {datetime_obj}")
+                        return datetime_obj
+                    else:
+                        logger.warning(f"Failed to convert Shamsi date to datetime: {date_text}")
         
         # Alternative approach: look for any li containing calendar icon and date pattern
         li_elements = soup.find_all('li')
@@ -86,7 +97,12 @@ def _extract_published_date(soup: BeautifulSoup) -> Optional[str]:
                     # Check if it contains Shamsi date pattern (Persian digits and month names)
                     if _is_shamsi_date_pattern(date_text):
                         logger.debug(f"Found Shamsi date: {date_text}")
-                        return date_text
+                        
+                        # Convert to datetime
+                        datetime_obj = convert_shamsi_to_datetime(date_text)
+                        if datetime_obj:
+                            logger.debug(f"Converted to datetime: {datetime_obj}")
+                            return datetime_obj
         
         # Fallback: search for any element containing Shamsi date pattern
         all_text_meta = soup.find_all('span', class_='text-meta')
@@ -94,7 +110,12 @@ def _extract_published_date(soup: BeautifulSoup) -> Optional[str]:
             text = span.get_text().strip()
             if _is_shamsi_date_pattern(text):
                 logger.debug(f"Found Shamsi date in text-meta: {text}")
-                return text
+                
+                # Convert to datetime
+                datetime_obj = convert_shamsi_to_datetime(text)
+                if datetime_obj:
+                    logger.debug(f"Converted to datetime: {datetime_obj}")
+                    return datetime_obj
                 
         logger.warning("Could not find published date with calendar icon structure")
         return None
@@ -137,14 +158,14 @@ def _extract_title(soup: BeautifulSoup) -> Optional[str]:
         
         if title_element:
             title = title_element.get_text().strip()
-            logger.debug(f"Found title: {title[:50]}...")
+            logger.debug(f"Found title: {title}")
             return title
-            
+        
         # Fallback: try to find any h1 with itemprop="headline"
         title_element = soup.find('h1', attrs={'itemprop': 'headline'})
         if title_element:
             title = title_element.get_text().strip()
-            logger.debug(f"Found title via itemprop: {title[:50]}...")
+            logger.debug(f"Found title via itemprop: {title}")
             return title
             
         logger.warning("Could not find title element")
@@ -163,7 +184,7 @@ def _extract_summary(soup: BeautifulSoup) -> Optional[str]:
             summary = summary_element.get_text().strip()
             logger.debug(f"Found summary: {summary[:50]}...")
             return summary
-            
+        
         # Fallback: try to find any element with itemprop="description"
         summary_element = soup.find(attrs={'itemprop': 'description'})
         if summary_element:
@@ -286,7 +307,7 @@ def test_extractor():
     result = extract_news_article(sample_html)
     
     print("Extraction Results:")
-    print(f"Published Date: {result['published_date']}")
+    print(f"Published Date: {result['published_date']} (type: {type(result['published_date'])})")
     print(f"Title: {result['title']}")
     print(f"Summary: {result['summary']}")
     print(f"Content: {result['content'][:100]}..." if result['content'] else "Content: None")

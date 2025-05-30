@@ -23,11 +23,21 @@ class SeleniumConfig(BaseSettings):
     hub_url: str = Field(default="http://localhost:4444/wd/hub", description="Selenium hub URL")
     display: str = Field(default=":99", description="Display setting")
     node_max_sessions: int = Field(default=10, description="Max sessions per node")
-    node_override_max_sessions: bool = Field(default=True, description="Override max sessions")
-    node_session_timeout: int = Field(default=300, description="Session timeout in seconds")
     
     class Config:
         env_prefix = "SE_"
+        case_sensitive = False
+
+class CrawlerConfig(BaseSettings):
+    """Page crawler configuration settings"""
+    bulk_size: int = Field(default=20, description="Number of pages to process in each batch")
+    max_workers: int = Field(default=5, description="Maximum concurrent workers")
+    sleep_interval: int = Field(default=30, description="Sleep interval between batches (seconds)")
+    max_retries: int = Field(default=3, description="Maximum retry attempts for failed pages")
+    retry_delay: int = Field(default=10, description="Delay between retries (seconds)")
+    
+    class Config:
+        env_prefix = "CRAWLER_"
         case_sensitive = False
 
 class AppConfig(BaseSettings):
@@ -43,6 +53,7 @@ class Settings(BaseSettings):
     """Main settings class that combines all configurations"""
     database: DatabaseConfig = DatabaseConfig()
     selenium: SeleniumConfig = SeleniumConfig()
+    crawler: CrawlerConfig = CrawlerConfig()
     app: AppConfig = AppConfig()
     
     class Config:

@@ -1,352 +1,283 @@
-from crawlers.isna.page_crawler import ISNAPageCrawler
-from crawlers.isna.links_crawler import ISNALinksCrawler
-from database_manager import DatabaseManager
-from utils.shamsi_date import ShamsiDate
-from config import settings
-import logging
-import time
+#!/usr/bin/env python3
+"""
+ISNA News Page Crawler - Continuous Bulk Processing
 
-# Setup logging using config
+This script runs continuously, processing unprocessed news links in batches.
+It fetches pages concurrently, extracts article data, and persists to database.
+
+Configuration is managed through environment variables and config.py
+"""
+
+import time
+import logging
+import signal
+import sys
+from datetime import datetime
+from crawlers.isna.page_crawler import ISNAPageCrawler
+from database_manager import DatabaseManager
+from config import settings
+
+# Setup logging
 logging.basicConfig(
     level=getattr(logging, settings.app.log_level.upper()),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('page_crawler.log')
+    ]
 )
 
-def complete_news_pipeline():
-    """Complete pipeline: crawl links then process them into articles"""
-    
-    print("🚀 ISNA News Crawling and Processing Pipeline")
-    print("=" * 60)
-    
-    # Step 1: Crawl links for recent dates
-    print("\n📡 Step 1: Crawling news links...")
-    links_crawler = ISNALinksCrawler()
-    
-    try:
-        # Get last 5 days of links
-        dates_to_crawl = ShamsiDate.get_last_n_days(5)
-        
-        print(f"📅 Crawling links for {len(dates_to_crawl)} recent dates:")
-        for i, (year, month, day) in enumerate(dates_to_crawl, 1):
-            print(f"   {i}. {year}/{month}/{day}")
-        
-        # Crawl links with 2 concurrent workers
-        batch_result = links_crawler.crawl_dates_batch(dates_to_crawl, max_workers=2)
-        
-        links_summary = batch_result['summary']
-        print(f"\n✅ Links crawling completed:")
-        print(f"   📊 Total links crawled: {links_summary['total_links']}")
-        print(f"   ✅ Successful dates: {links_summary['successful_dates']}")
-        print(f"   ❌ Failed dates: {links_summary['failed_dates']}")
-        
-        if links_summary['total_links'] == 0:
-            print("⚠️  No new links found. Proceeding with existing unprocessed links...")
-        
-    except Exception as e:
-        print(f"❌ Error in links crawling: {str(e)}")
-        return
-    finally:
-        links_crawler.cleanup()
-    
-    # Step 2: Process unprocessed links into articles
-    print(f"\n📰 Step 2: Processing links into articles...")
-    page_crawler = ISNAPageCrawler()
-    
-    try:
-        # Process up to 30 unprocessed links with 3 concurrent workers
-        processing_result = page_crawler.crawl_unprocessed_links(
-            source='ISNA', 
-            limit=30, 
-            max_workers=3
-        )
-        
-        processing_summary = processing_result['summary']
-        print(f"\n✅ Article processing completed:")
-        print(f"   📊 Total links processed: {processing_summary['total_processed']}")
-        print(f"   ✅ Successful extractions: {processing_summary['successful']}")
-        print(f"   ❌ Failed extractions: {processing_summary['failed']}")
-        
-        if processing_summary['total_processed'] > 0:
-            success_rate = (processing_summary['successful'] / processing_summary['total_processed']) * 100
-            print(f"   📈 Success rate: {success_rate:.1f}%")
-        
-        # Show sample successful articles
-        successful_results = [r for r in processing_result['results'].values() if r['success']]
-        if successful_results:
-            print(f"\n📄 Sample processed articles:")
-            for i, result in enumerate(successful_results[:3], 1):
-                print(f"   {i}. {result['title']}")
-        
-    except Exception as e:
-        print(f"❌ Error in article processing: {str(e)}")
-    finally:
-        page_crawler.cleanup()
+logger = logging.getLogger(__name__)
 
-def process_unprocessed_links_only():
-    """Process only existing unprocessed links without crawling new ones"""
+class ContinuousPageCrawler:
+    """Continuous page crawler with bulk processing"""
     
-    print("📰 Processing Existing Unprocessed Links")
-    print("=" * 50)
+    def __init__(self):
+        self.running = True
+        self.page_crawler = None
+        self.db_manager = None
+        self.stats = {
+            'total_processed': 0,
+            'total_successful': 0,
+            'total_failed': 0,
+            'batches_completed': 0,
+            'start_time': datetime.now()
+        }
+        
+        # Configuration from settings
+        self.bulk_size = settings.crawler.bulk_size
+        self.max_workers = settings.crawler.max_workers
+        self.sleep_interval = settings.crawler.sleep_interval
+        self.max_retries = settings.crawler.max_retries
+        self.retry_delay = settings.crawler.retry_delay
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
+        self.running = False
     
-    page_crawler = ISNAPageCrawler()
-    
-    try:
-        # Check how many unprocessed links we have
-        db_manager = DatabaseManager()
-        db_manager.connect()
-        unprocessed_count = len(db_manager.get_unprocessed_links(source='ISNA'))
-        db_manager.close()
-        
-        print(f"📊 Found {unprocessed_count} unprocessed ISNA links")
-        
-        if unprocessed_count == 0:
-            print("ℹ️  No unprocessed links found. Run link crawling first.")
-            return
-        
-        # Process up to 50 unprocessed links with 4 concurrent workers
-        result = page_crawler.crawl_unprocessed_links(
-            source='ISNA', 
-            limit=min(50, unprocessed_count), 
-            max_workers=4
-        )
-        
-        summary = result['summary']
-        print(f"\n✅ Processing completed:")
-        print(f"   📊 Total links: {summary['total_links']}")
-        print(f"   ✅ Successful: {summary['successful']}")
-        print(f"   ❌ Failed: {summary['failed']}")
-        
-        if summary['total_processed'] > 0:
-            success_rate = (summary['successful'] / summary['total_processed']) * 100
-            print(f"   📈 Success rate: {success_rate:.1f}%")
-        
-        # Show some successful results
-        successful_results = [r for r in result['results'].values() if r['success']]
-        if successful_results:
-            print(f"\n📄 Sample successful articles:")
-            for i, result in enumerate(successful_results[:5], 1):
-                print(f"   {i}. {result['title']}")
-        
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-    finally:
-        page_crawler.cleanup()
-
-def process_recent_links_by_date():
-    """Process links from recent days only"""
-    
-    print("📅 Processing Recent Links by Date Range")
-    print("=" * 50)
-    
-    page_crawler = ISNAPageCrawler()
-    
-    try:
-        # Process links from last 7 days with 3 concurrent workers
-        result = page_crawler.crawl_batch_by_date_range(
-            source='ISNA', 
-            days_back=7, 
-            max_workers=3
-        )
-        
-        if result:
-            summary = result['summary']
-            print(f"✅ Recent links processing completed:")
-            print(f"   📅 Date range: {summary.get('date_range', 'N/A')}")
-            print(f"   📊 Total links: {summary['total_links']}")
-            print(f"   ✅ Successful: {summary['successful']}")
-            print(f"   ❌ Failed: {summary['failed']}")
-            
-            if summary['total_processed'] > 0:
-                success_rate = (summary['successful'] / summary['total_processed']) * 100
-                print(f"   📈 Success rate: {success_rate:.1f}%")
-        else:
-            print("ℹ️  No recent unprocessed links found.")
-        
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-    finally:
-        page_crawler.cleanup()
-
-def show_comprehensive_statistics():
-    """Show comprehensive database statistics"""
-    
-    print("📊 Comprehensive Database Statistics")
-    print("=" * 50)
-    
-    db_manager = DatabaseManager()
-    
-    try:
-        db_manager.connect()
-        
-        # Get general statistics
-        stats = db_manager.get_news_statistics()
-        print(f"📈 Database Overview:")
-        print(f"   🔗 Total links: {stats['total_links']}")
-        print(f"   ✅ Processed links: {stats['processed_links']}")
-        print(f"   ⏳ Unprocessed links: {stats['unprocessed_links']}")
-        print(f"   📰 Total articles: {stats['total_articles']}")
-        print(f"   📡 Sources: {stats['sources_count']}")
-        
-        # Calculate processing rate
-        if stats['total_links'] > 0:
-            processing_rate = (stats['processed_links'] / stats['total_links']) * 100
-            print(f"   📊 Processing rate: {processing_rate:.1f}%")
-        
-        # Get recent articles
-        recent_articles = db_manager.get_news_articles(source='ISNA', limit=5)
-        if recent_articles:
-            print(f"\n📄 Recent articles:")
-            for i, article in enumerate(recent_articles, 1):
-                title = article['title'][:60] + '...' if article['title'] and len(article['title']) > 60 else article['title'] or 'No title'
-                published = article['published_date'] or 'Unknown date'
-                tags_count = len(article['tags']) if article['tags'] else 0
-                
-                print(f"   {i}. {title}")
-                print(f"      📅 Published: {published}")
-                print(f"      🏷️  Tags: {tags_count} tags")
-                print()
-        
-        # Get unprocessed links sample
-        unprocessed_links = db_manager.get_unprocessed_links(source='ISNA', limit=3)
-        if unprocessed_links:
-            print(f"⏳ Sample unprocessed links:")
-            for i, link in enumerate(unprocessed_links, 1):
-                title = link['title'][:50] + '...' if link['title'] else 'No title'
-                print(f"   {i}. {title}")
-                print(f"      🔗 {link['link']}")
-                print(f"      📅 Date: {link['date']}")
-                print()
-        
-    except Exception as e:
-        print(f"❌ Error fetching statistics: {str(e)}")
-    finally:
-        db_manager.close()
-
-def quick_test_single_article():
-    """Quick test to process just one article"""
-    
-    print("🧪 Quick Test: Processing Single Article")
-    print("=" * 45)
-    
-    page_crawler = ISNAPageCrawler()
-    
-    try:
-        # Get one unprocessed link
-        db_manager = DatabaseManager()
-        db_manager.connect()
-        unprocessed_links = db_manager.get_unprocessed_links(source='ISNA', limit=1)
-        db_manager.close()
-        
-        if not unprocessed_links:
-            print("ℹ️  No unprocessed links available for testing.")
-            return
-        
-        link_data = unprocessed_links[0]
-        print(f"🔗 Testing with link: {link_data['link']}")
-        print(f"📰 Title: {link_data['title'] or 'No title'}")
-        
-        # Process the single link
-        result = page_crawler.crawl_single_page(link_data)
-        
-        if result['success']:
-            print(f"✅ Successfully processed!")
-            print(f"   📰 Extracted title: {result['title']}")
-            print(f"   🆔 News ID: {result['news_id']}")
-        else:
-            print(f"❌ Processing failed: {result['error']}")
-        
-    except Exception as e:
-        print(f"❌ Error in test: {str(e)}")
-    finally:
-        page_crawler.cleanup()
-
-def benchmark_processing_speed():
-    """Benchmark the processing speed with different worker counts"""
-    
-    print("⚡ Processing Speed Benchmark")
-    print("=" * 40)
-    
-    # Test with different worker counts
-    worker_counts = [1, 2, 3, 4]
-    
-    for workers in worker_counts:
-        print(f"\n🔧 Testing with {workers} worker(s)...")
-        
-        page_crawler = ISNAPageCrawler()
-        start_time = time.time()
-        
+    def _setup_resources(self):
+        """Setup database and crawler resources"""
         try:
-            result = page_crawler.crawl_unprocessed_links(
+            # Initialize database manager
+            self.db_manager = DatabaseManager()
+            self.db_manager.connect()
+            
+            # Initialize page crawler
+            self.page_crawler = ISNAPageCrawler(db_manager=self.db_manager)
+            
+            logger.info("Resources initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to setup resources: {str(e)}")
+            return False
+    
+    def _cleanup_resources(self):
+        """Cleanup resources"""
+        try:
+            if self.page_crawler:
+                self.page_crawler.cleanup()
+                
+            if self.db_manager:
+                self.db_manager.close()
+                
+            logger.info("Resources cleaned up successfully")
+            
+        except Exception as e:
+            logger.warning(f"Error during cleanup: {str(e)}")
+    
+    def _get_unprocessed_batch(self):
+        """Get a batch of unprocessed links"""
+        try:
+            unprocessed_links = self.db_manager.get_unprocessed_links(
                 source='ISNA', 
-                limit=10,  # Process 10 links for benchmark
-                max_workers=workers
+                limit=self.bulk_size
             )
             
-            end_time = time.time()
-            duration = end_time - start_time
+            logger.info(f"Retrieved {len(unprocessed_links)} unprocessed links for batch")
+            return unprocessed_links
             
-            summary = result['summary']
-            if summary['total_processed'] > 0:
-                speed = summary['total_processed'] / duration
-                print(f"   ⏱️  Duration: {duration:.2f} seconds")
-                print(f"   📊 Processed: {summary['total_processed']} links")
-                print(f"   ⚡ Speed: {speed:.2f} links/second")
-                print(f"   ✅ Success rate: {(summary['successful']/summary['total_processed']*100):.1f}%")
-            else:
-                print(f"   ℹ️  No links to process")
-                break
-                
         except Exception as e:
-            print(f"   ❌ Error: {str(e)}")
-        finally:
-            page_crawler.cleanup()
+            logger.error(f"Error retrieving unprocessed links: {str(e)}")
+            return []
+    
+    def _process_batch(self, links_batch):
+        """Process a batch of links with retry logic"""
+        if not links_batch:
+            return {'successful': 0, 'failed': 0, 'total_processed': 0}
+        
+        logger.info(f"Processing batch of {len(links_batch)} links with {self.max_workers} workers")
+        
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                # Process the batch
+                result = self.page_crawler.crawl_unprocessed_links(
+                    source='ISNA',
+                    limit=len(links_batch),
+                    max_workers=self.max_workers
+                )
+                
+                summary = result['summary']
+                
+                # Log batch results
+                logger.info(f"Batch completed - Processed: {summary['total_processed']}, "
+                           f"Successful: {summary['successful']}, Failed: {summary['failed']}")
+                
+                # Update global stats
+                self.stats['total_processed'] += summary['total_processed']
+                self.stats['total_successful'] += summary['successful']
+                self.stats['total_failed'] += summary['failed']
+                self.stats['batches_completed'] += 1
+                
+                return summary
+                
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Batch processing failed (attempt {retry_count}/{self.max_retries}): {str(e)}")
+                
+                if retry_count < self.max_retries:
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error("Max retries reached. Batch processing failed.")
+                    return {'successful': 0, 'failed': len(links_batch), 'total_processed': len(links_batch)}
+        
+        return {'successful': 0, 'failed': 0, 'total_processed': 0}
+    
+    def _log_progress_stats(self):
+        """Log current progress statistics"""
+        runtime = datetime.now() - self.stats['start_time']
+        
+        logger.info("=" * 60)
+        logger.info("📊 CRAWLER PROGRESS STATISTICS")
+        logger.info("=" * 60)
+        logger.info(f"🕐 Runtime: {runtime}")
+        logger.info(f"📦 Batches completed: {self.stats['batches_completed']}")
+        logger.info(f"📄 Total pages processed: {self.stats['total_processed']}")
+        logger.info(f"✅ Successful extractions: {self.stats['total_successful']}")
+        logger.info(f"❌ Failed extractions: {self.stats['total_failed']}")
+        
+        if self.stats['total_processed'] > 0:
+            success_rate = (self.stats['total_successful'] / self.stats['total_processed']) * 100
+            logger.info(f"📈 Success rate: {success_rate:.1f}%")
             
-        # Small delay between tests
-        time.sleep(2)
+            # Calculate processing speed
+            total_seconds = runtime.total_seconds()
+            if total_seconds > 0:
+                pages_per_hour = (self.stats['total_processed'] / total_seconds) * 3600
+                logger.info(f"⚡ Processing speed: {pages_per_hour:.1f} pages/hour")
+        
+        logger.info("=" * 60)
+    
+    def _check_database_status(self):
+        """Check database status and log statistics"""
+        try:
+            stats = self.db_manager.get_news_statistics()
+            
+            logger.info(f"📊 Database Status:")
+            logger.info(f"   Total links: {stats['total_links']}")
+            logger.info(f"   Processed links: {stats['processed_links']}")
+            logger.info(f"   Unprocessed links: {stats['unprocessed_links']}")
+            logger.info(f"   Total articles: {stats['total_articles']}")
+            
+            return stats['unprocessed_links']
+            
+        except Exception as e:
+            logger.error(f"Error checking database status: {str(e)}")
+            return 0
+    
+    def run(self):
+        """Main continuous processing loop"""
+        logger.info("🚀 Starting ISNA News Page Crawler - Continuous Mode")
+        logger.info("=" * 60)
+        logger.info(f"📋 Configuration:")
+        logger.info(f"   Bulk size: {self.bulk_size}")
+        logger.info(f"   Max workers: {self.max_workers}")
+        logger.info(f"   Sleep interval: {self.sleep_interval}s")
+        logger.info(f"   Max retries: {self.max_retries}")
+        logger.info("=" * 60)
+        
+        # Setup resources
+        if not self._setup_resources():
+            logger.error("Failed to setup resources. Exiting.")
+            return False
+        
+        try:
+            # Main processing loop
+            while self.running:
+                logger.info(f"🔄 Starting new processing cycle...")
+                
+                # Check database status
+                unprocessed_count = self._check_database_status()
+                
+                if unprocessed_count == 0:
+                    logger.info("✅ No unprocessed links found. Waiting for new links...")
+                    self._log_progress_stats()
+                    
+                    # Wait before checking again
+                    for i in range(self.sleep_interval):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+                    continue
+                
+                # Get batch of unprocessed links
+                links_batch = self._get_unprocessed_batch()
+                
+                if not links_batch:
+                    logger.warning("No links retrieved despite unprocessed count > 0. Waiting...")
+                    time.sleep(self.sleep_interval)
+                    continue
+                
+                # Process the batch
+                batch_result = self._process_batch(links_batch)
+                
+                # Log progress every 10 batches or if no successful processing
+                if (self.stats['batches_completed'] % 10 == 0 or 
+                    batch_result['successful'] == 0):
+                    self._log_progress_stats()
+                
+                # Sleep between batches if still running
+                if self.running and unprocessed_count > len(links_batch):
+                    logger.info(f"😴 Sleeping for {self.sleep_interval} seconds before next batch...")
+                    for i in range(self.sleep_interval):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+        
+        except Exception as e:
+            logger.error(f"💥 Critical error in main loop: {str(e)}")
+            return False
+        
+        finally:
+            # Final statistics
+            logger.info("🏁 Crawler stopping...")
+            self._log_progress_stats()
+            self._cleanup_resources()
+            logger.info("👋 Crawler stopped gracefully")
+        
+        return True
 
 def main():
-    """Main function with menu-driven interface"""
+    """Main entry point"""
+    crawler = ContinuousPageCrawler()
     
-    print("🗞️  ISNA News Crawler - Page Processing Examples")
-    print("=" * 60)
-    
-    # Show current Shamsi date
-    current_year, current_month, current_day = ShamsiDate.current_shamsi_date()
-    print(f"📅 Current Shamsi Date: {current_year}/{current_month}/{current_day}")
-    print(f"🌙 Current Month: {ShamsiDate.MONTH_NAMES[current_month-1]}")
-    print()
-    
-    while True:
-        print("Choose an option:")
-        print("1. 🚀 Complete Pipeline (Crawl links + Process articles)")
-        print("2. 📰 Process Existing Unprocessed Links")
-        print("3. 📅 Process Recent Links by Date Range")
-        print("4. 📊 Show Database Statistics")
-        print("5. 🧪 Quick Test (Single Article)")
-        print("6. ⚡ Benchmark Processing Speed")
-        print("7. 🚪 Exit")
+    try:
+        success = crawler.run()
+        sys.exit(0 if success else 1)
         
-        choice = input("\nEnter your choice (1-7): ").strip()
-        
-        if choice == '1':
-            complete_news_pipeline()
-        elif choice == '2':
-            process_unprocessed_links_only()
-        elif choice == '3':
-            process_recent_links_by_date()
-        elif choice == '4':
-            show_comprehensive_statistics()
-        elif choice == '5':
-            quick_test_single_article()
-        elif choice == '6':
-            benchmark_processing_speed()
-        elif choice == '7':
-            print("👋 Goodbye!")
-            break
-        else:
-            print("❌ Invalid choice. Please try again.")
-        
-        print("\n" + "="*60)
+    except KeyboardInterrupt:
+        logger.info("🛑 Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"💥 Unexpected error: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
