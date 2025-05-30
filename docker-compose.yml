@@ -1,0 +1,21 @@
+version: '3'
+services:
+  chrome:
+    image: seleniarm/standalone-chromium:latest
+    ports:
+      - "4444:4444"
+    shm_size: "4g"  # Increased memory
+    env_file:
+      - .docker.env
+
+  postgres:
+    image: postgres:15
+    ports:
+      - "5433:5432"
+    env_file:
+      - .docker.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

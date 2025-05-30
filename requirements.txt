@@ -1,9 +1,24 @@
-selenium==4.24.0
-beautifulsoup4==4.12.3
-jdatetime==5.0.0
-webdriver-manager==4.0.2
-aiohttp==3.11.12
-fastapi==0.115.8
-uvicorn==0.34.0
-pydantic==2.10.6
-pydantic-settings==2.7.1
+# Web scraping and parsing
+beautifulsoup4==4.12.2
+requests==2.31.0
+lxml==4.9.3
+
+# Selenium for browser automation
+selenium==4.15.2
+
+# Database
+psycopg2-binary==2.9.7
+
+# Configuration management
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Utility libraries
+python-dateutil==2.8.2
+
+# Optional: For better logging and debugging
+colorlog==6.8.0
+
+# Note: concurrent.futures is part of Python 3.2+ standard library
+# For production Shamsi date handling, consider: jdatetime==4.1.0
