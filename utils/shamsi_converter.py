@@ -1,17 +1,16 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import re
 import logging
+import pytz
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
-class ShamsiToDatetimeConverter:
-    """Convert Shamsi (Persian) date strings to Python datetime objects"""
-    
-    # Shamsi month names and their corresponding numbers
-    SHAMSI_MONTHS = {
-        'فروردین': 1, 'اردیبهشت': 2, 'خرداد': 3, 'تیر': 4, 'مرداد': 5, 'شهریور': 6,
-        'مهر': 7, 'آبان': 8, 'آذر': 9, 'دی': 10, 'بهمن': 11, 'اسفند': 12
-    }
+class ShamsiDateConverter:
+    """
+    Converter for Shamsi (Persian) dates to Gregorian dates
+    Handles formats like: "۵ خرداد ۰۴ - ۰۹:۳۲"
+    """
     
     # Persian to English digit mapping
     PERSIAN_DIGITS = {
@@ -19,159 +18,183 @@ class ShamsiToDatetimeConverter:
         '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9'
     }
     
-    @classmethod
-    def persian_to_english_digits(cls, text):
+    # Shamsi month names to numbers
+    SHAMSI_MONTHS = {
+        'فروردین': 1, 'اردیبهشت': 2, 'خرداد': 3, 'تیر': 4,
+        'مرداد': 5, 'شهریور': 6, 'مهر': 7, 'آبان': 8,
+        'آذر': 9, 'دی': 10, 'بهمن': 11, 'اسفند': 12
+    }
+    
+    def __init__(self, default_timezone='Asia/Tehran'):
+        self.default_tz = pytz.timezone(default_timezone)
+    
+    def persian_to_english_digits(self, text: str) -> str:
         """Convert Persian digits to English digits"""
-        if not text:
-            return text
-            
-        for persian, english in cls.PERSIAN_DIGITS.items():
+        for persian, english in self.PERSIAN_DIGITS.items():
             text = text.replace(persian, english)
         return text
     
-    @classmethod
-    def parse_shamsi_date_string(cls, date_string):
+    def parse_shamsi_date_string(self, date_string: str) -> Optional[dict]:
         """
-        Parse Shamsi date string and extract components
-        
-        Expected formats:
-        - "۹ خرداد ۱۴۰۴ / ۱۲:۰۳"
-        - "۱۰ آبان ۱۴۰۳ / ۱۴:۲۵"
-        
-        Returns:
-            dict: {'day': int, 'month': int, 'year': int, 'hour': int, 'minute': int}
+        Parse Shamsi date string like "۵ خرداد ۰۴ - ۰۹:۳۲"
+        Returns dict with day, month, year, hour, minute
         """
-        if not date_string:
-            return None
-        
         try:
             # Convert Persian digits to English
-            normalized_string = cls.persian_to_english_digits(date_string)
+            normalized = self.persian_to_english_digits(date_string.strip())
             
-            # Pattern to match: "day month_name year / hour:minute"
-            pattern = r'(\d+)\s+(\w+)\s+(\d+)\s*/\s*(\d+):(\d+)'
-            match = re.search(pattern, normalized_string)
+            # Pattern for "day month year - hour:minute"
+            pattern = r'(\d+)\s+(\w+)\s+(\d+)\s*-\s*(\d+):(\d+)'
+            match = re.search(pattern, normalized)
             
             if not match:
-                logger.warning(f"Could not parse Shamsi date string: {date_string}")
-                return None
-            
-            day_str, month_name, year_str, hour_str, minute_str = match.groups()
-            
-            # Convert to integers
-            day = int(day_str)
-            year = int(year_str)
-            hour = int(hour_str)
-            minute = int(minute_str)
+                # Try simpler pattern without time
+                pattern = r'(\d+)\s+(\w+)\s+(\d+)'
+                match = re.search(pattern, normalized)
+                if not match:
+                    return None
+                
+                day, month_name, year = match.groups()
+                hour, minute = 0, 0
+            else:
+                day, month_name, year, hour, minute = match.groups()
             
             # Find month number
-            month = cls.SHAMSI_MONTHS.get(month_name)
-            if not month:
-                logger.warning(f"Unknown Shamsi month: {month_name}")
+            month = None
+            for shamsi_month, month_num in self.SHAMSI_MONTHS.items():
+                if month_name in shamsi_month or shamsi_month.startswith(month_name):
+                    month = month_num
+                    break
+            
+            if month is None:
                 return None
             
             return {
-                'day': day,
-                'month': month,
-                'year': year,
-                'hour': hour,
-                'minute': minute
+                'day': int(day),
+                'month': int(month),
+                'year': int(year),
+                'hour': int(hour),
+                'minute': int(minute)
             }
             
         except Exception as e:
-            logger.error(f"Error parsing Shamsi date string '{date_string}': {str(e)}")
+            print(f"Error parsing Shamsi date '{date_string}': {e}")
             return None
     
-    @classmethod
-    def shamsi_to_gregorian(cls, shamsi_year, shamsi_month, shamsi_day):
+    def shamsi_to_gregorian(self, shamsi_year: int, shamsi_month: int, shamsi_day: int) -> Optional[date]:
         """
         Convert Shamsi date to Gregorian date
-        
-        This is a simplified conversion. For production use, consider using
-        a proper Persian calendar library like 'jdatetime' or 'persiantools'
+        Note: This is a simplified conversion. For production, use a proper library like jdatetime
         """
         try:
-            # Approximate conversion (this is simplified and may have small errors)
-            # For accurate conversion, use a proper Persian calendar library
+            # Simple approximation - for accurate conversion use jdatetime library
+            # This assumes the year is in short format (e.g., 04 = 1404)
+            if shamsi_year < 100:
+                shamsi_year += 1400 if shamsi_year < 50 else 1300
             
-            # Base date: 1 Farvardin 1400 = March 21, 2021
-            base_shamsi_year = 1400
-            base_gregorian_date = datetime(2021, 3, 21)
+            # Approximate conversion (not accurate for all dates)
+            # For accurate conversion, install and use jdatetime library
+            gregorian_year = shamsi_year + 621
             
-            # Calculate days difference from base date
-            years_diff = shamsi_year - base_shamsi_year
+            # Simple month/day mapping (approximate)
+            if shamsi_month <= 6:
+                gregorian_month = shamsi_month + 3
+                gregorian_day = shamsi_day
+            else:
+                gregorian_month = shamsi_month - 6
+                gregorian_day = shamsi_day
+                gregorian_year += 1
             
-            # Approximate days in a Shamsi year (365.2422 days)
-            days_from_years = years_diff * 365.2422
+            # Adjust for month overflow
+            if gregorian_month > 12:
+                gregorian_month -= 12
+                gregorian_year += 1
             
-            # Days from months (approximate)
-            days_from_months = 0
-            for month in range(1, shamsi_month):
-                if month <= 6:
-                    days_from_months += 31  # First 6 months have 31 days
-                elif month <= 11:
-                    days_from_months += 30  # Next 5 months have 30 days
-                else:
-                    days_from_months += 29  # Last month has 29 days (30 in leap years)
-            
-            # Add days
-            days_from_days = shamsi_day - 1
-            
-            total_days = days_from_years + days_from_months + days_from_days
-            
-            # Calculate final Gregorian date
-            gregorian_date = base_gregorian_date + timedelta(days=total_days)
-            
-            return gregorian_date.date()
+            return date(gregorian_year, gregorian_month, min(shamsi_day, 28))
             
         except Exception as e:
-            logger.error(f"Error converting Shamsi to Gregorian: {str(e)}")
+            print(f"Error converting Shamsi to Gregorian: {e}")
             return None
     
-    @classmethod
-    def convert_shamsi_string_to_datetime(cls, shamsi_string):
+    def parse_shamsi_datetime(self, date_string: str, timezone=None) -> Optional[datetime]:
         """
-        Convert Shamsi date string to Python datetime object
-        
-        Args:
-            shamsi_string (str): Shamsi date string like "۹ خرداد ۱۴۰۴ / ۱۲:۰۳"
-            
-        Returns:
-            datetime: Python datetime object or None if conversion fails
+        Parse Shamsi date string and return timezone-aware datetime
         """
-        try:
-            # Parse the Shamsi string
-            parsed = cls.parse_shamsi_date_string(shamsi_string)
-            if not parsed:
-                return None
-            
-            # Convert Shamsi date to Gregorian
-            gregorian_date = cls.shamsi_to_gregorian(
-                parsed['year'], 
-                parsed['month'], 
-                parsed['day']
-            )
-            
-            if not gregorian_date:
-                return None
-            
-            # Combine date and time
-            result_datetime = datetime.combine(
-                gregorian_date,
-                datetime.min.time().replace(
-                    hour=parsed['hour'],
-                    minute=parsed['minute']
-                )
-            )
-            
-            logger.debug(f"Converted '{shamsi_string}' to {result_datetime}")
-            return result_datetime
-            
-        except Exception as e:
-            logger.error(f"Error converting Shamsi string to datetime: {str(e)}")
+        parsed = self.parse_shamsi_date_string(date_string)
+        if not parsed:
             return None
+        
+        # Convert to Gregorian date
+        gregorian_date = self.shamsi_to_gregorian(
+            parsed['year'], 
+            parsed['month'], 
+            parsed['day']
+        )
+        
+        if not gregorian_date:
+            return None
+        
+        # Create datetime with time
+        dt = datetime.combine(
+            gregorian_date,
+            datetime.min.time().replace(
+                hour=parsed['hour'],
+                minute=parsed['minute']
+            )
+        )
+        
+        # Make timezone-aware
+        tz = timezone or self.default_tz
+        return tz.localize(dt)
+    
+    def parse_shamsi_date_only(self, date_string: str) -> Optional[date]:
+        """
+        Parse Shamsi date string and return only the date part
+        """
+        parsed = self.parse_shamsi_date_string(date_string)
+        if not parsed:
+            return None
+        
+        return self.shamsi_to_gregorian(
+            parsed['year'], 
+            parsed['month'], 
+            parsed['day']
+        )
 
-# Convenience function for easy import
-def convert_shamsi_to_datetime(shamsi_string):
-    """Convert Shamsi date string to datetime object"""
-    return ShamsiToDatetimeConverter.convert_shamsi_string_to_datetime(shamsi_string) 
+# Convenience functions
+def parse_shamsi_datetime(date_string: str, timezone='Asia/Tehran') -> Optional[datetime]:
+    """Parse Shamsi datetime string to timezone-aware datetime"""
+    converter = ShamsiDateConverter(timezone)
+    return converter.parse_shamsi_datetime(date_string)
+
+def parse_shamsi_date(date_string: str) -> Optional[date]:
+    """Parse Shamsi date string to date object"""
+    converter = ShamsiDateConverter()
+    return converter.parse_shamsi_date_only(date_string)
+
+# Example usage
+if __name__ == "__main__":
+    # Test the converter
+    test_dates = [
+        "۵ خرداد ۰۴ - ۰۹:۳۲",
+        "۱۵ مهر ۰۳ - ۱۴:۲۰",
+        "۲۸ اسفند ۰۲"
+    ]
+    
+    converter = ShamsiDateConverter()
+    
+    for test_date in test_dates:
+        print(f"Input: {test_date}")
+        
+        # Parse datetime
+        dt = converter.parse_shamsi_datetime(test_date)
+        if dt:
+            print(f"DateTime: {dt}")
+            print(f"UTC: {dt.astimezone(pytz.UTC)}")
+        
+        # Parse date only
+        d = converter.parse_shamsi_date_only(test_date)
+        if d:
+            print(f"Date: {d}")
+        
+        print("-" * 40) 
