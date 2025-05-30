@@ -3,28 +3,58 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import logging
 from config import settings
-import re
+import threading
+from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 class DatabaseManager:
+    """
+    Database manager optimized for laptop resources
+    """
+    
     def __init__(self):
         self.connection = None
         self.logger = logging.getLogger(__name__)
         self.db_config = settings.database
+        self._connection_lock = threading.Lock()
         
     def connect(self):
-        """Establish database connection"""
+        """Establish single database connection"""
         try:
             self.connection = psycopg2.connect(
                 host=self.db_config.host,
                 port=self.db_config.port,
                 database=self.db_config.database,
                 user=self.db_config.user,
-                password=self.db_config.password
+                password=self.db_config.password,
+                # Laptop-optimized connection settings
+                connect_timeout=10,
+                application_name='news_crawler_laptop'
             )
+            self.connection.autocommit = False
             self.logger.info(f"Database connection established to {self.db_config.host}:{self.db_config.port}")
         except Exception as e:
             self.logger.error(f"Error connecting to database: {str(e)}")
             raise
+    
+    @contextmanager
+    def get_cursor(self, commit=True):
+        """Context manager for database operations with automatic commit/rollback"""
+        with self._connection_lock:
+            cursor = None
+            try:
+                cursor = self.connection.cursor(cursor_factory=RealDictCursor)
+                yield cursor
+                if commit:
+                    self.connection.commit()
+            except Exception as e:
+                if cursor:
+                    self.connection.rollback()
+                raise e
+            finally:
+                if cursor:
+                    cursor.close()
     
     def close(self):
         """Close database connection"""
@@ -43,7 +73,7 @@ class DatabaseManager:
         """
         
         try:
-            with self.connection.cursor() as cursor:
+            with self.get_cursor() as cursor:
                 cursor.execute(check_query, (table_name,))
                 return cursor.fetchone()[0]
         except Exception as e:
@@ -61,33 +91,28 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
             link TEXT NOT NULL UNIQUE,
-            date DATE NOT NULL,
+            date DATE,
             has_processed BOOLEAN DEFAULT FALSE,
-            title TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Create indexes for better performance
-        CREATE INDEX idx_news_links_source ON news_links(source);
-        CREATE INDEX idx_news_links_date ON news_links(date);
-        CREATE INDEX idx_news_links_processed ON news_links(has_processed);
-        CREATE INDEX idx_news_links_source_processed ON news_links(source, has_processed);
+        -- Lightweight indexes for laptop
+        CREATE INDEX idx_news_links_processed ON news_links (has_processed) WHERE has_processed = FALSE;
+        CREATE INDEX idx_news_links_source ON news_links (source);
         """
         
         try:
-            with self.connection.cursor() as cursor:
+            with self.get_cursor() as cursor:
                 cursor.execute(create_table_query)
-                self.connection.commit()
-                self.logger.info("news_links table created successfully with indexes")
-                return True
+            self.logger.info("news_links table created successfully")
+            return True
         except Exception as e:
             self.logger.error(f"Error creating news_links table: {str(e)}")
-            self.connection.rollback()
-            raise
+            return False
     
     def create_news_table(self):
-        """Create the news table with datetime published_date"""
+        """Create the news table if it doesn't exist"""
         if self.table_exists('news'):
             self.logger.info("news table already exists")
             return True
@@ -97,7 +122,7 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
             published_date TIMESTAMP,
-            title TEXT,
+            title TEXT NOT NULL,
             summary TEXT,
             content TEXT,
             tags TEXT[],
@@ -106,133 +131,34 @@ class DatabaseManager:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Create indexes for better performance
-        CREATE INDEX idx_news_source ON news(source);
-        CREATE INDEX idx_news_published_date ON news(published_date);
-        CREATE INDEX idx_news_link_id ON news(link_id);
-        CREATE INDEX idx_news_title ON news USING gin(to_tsvector('english', title));
-        CREATE INDEX idx_news_content ON news USING gin(to_tsvector('english', content));
+        -- Lightweight indexes
+        CREATE INDEX idx_news_source ON news (source);
+        CREATE INDEX idx_news_published_date ON news (published_date DESC);
+        CREATE INDEX idx_news_link_id ON news (link_id);
         """
         
         try:
-            with self.connection.cursor() as cursor:
+            with self.get_cursor() as cursor:
                 cursor.execute(create_table_query)
-                self.connection.commit()
-                self.logger.info("news table created successfully with datetime published_date")
-                return True
+            self.logger.info("news table created successfully")
+            return True
         except Exception as e:
             self.logger.error(f"Error creating news table: {str(e)}")
-            self.connection.rollback()
-            raise
+            return False
     
     def create_tables_if_not_exist(self):
-        """Create all tables if they don't exist"""
+        """Create all required tables if they don't exist"""
         try:
             self.create_news_links_table()
             self.create_news_table()
-            self.logger.info("All tables created successfully")
+            self.logger.info("All tables verified/created successfully")
             return True
         except Exception as e:
             self.logger.error(f"Error creating tables: {str(e)}")
             return False
     
-    def get_table_info(self, table_name):
-        """Get detailed information about a table"""
-        info_query = """
-        SELECT 
-            column_name,
-            data_type,
-            is_nullable,
-            column_default
-        FROM information_schema.columns 
-        WHERE table_schema = 'public' 
-        AND table_name = %s
-        ORDER BY ordinal_position;
-        """
-        
-        try:
-            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(info_query, (table_name,))
-                return cursor.fetchall()
-        except Exception as e:
-            self.logger.error(f"Error getting table info for {table_name}: {str(e)}")
-            return []
-    
-    def get_database_schema_info(self):
-        """Get complete database schema information"""
-        schema_info = {}
-        
-        try:
-            # Get all tables
-            tables_query = """
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-            ORDER BY table_name;
-            """
-            
-            with self.connection.cursor() as cursor:
-                cursor.execute(tables_query)
-                tables = [row[0] for row in cursor.fetchall()]
-            
-            # Get info for each table
-            for table in tables:
-                schema_info[table] = self.get_table_info(table)
-            
-            return schema_info
-            
-        except Exception as e:
-            self.logger.error(f"Error getting database schema info: {str(e)}")
-            return {}
-    
-    def insert_news_link(self, source, link, date, title=None):
-        """Insert a single news link into the database"""
-        insert_query = """
-        INSERT INTO news_links (source, link, date, title)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (link) DO NOTHING
-        RETURNING id;
-        """
-        
-        try:
-            with self.connection.cursor() as cursor:
-                cursor.execute(insert_query, (source, link, date, title))
-                result = cursor.fetchone()
-                self.connection.commit()
-                
-                if result:
-                    self.logger.debug(f"Inserted news link: {link}")
-                    return result[0]
-                else:
-                    self.logger.debug(f"Link already exists: {link}")
-                    return None
-                    
-        except Exception as e:
-            self.logger.error(f"Error inserting news link: {str(e)}")
-            self.connection.rollback()
-            raise
-    
-    def insert_news_links_batch(self, links_data):
-        """Insert multiple news links in a batch"""
-        insert_query = """
-        INSERT INTO news_links (source, link, date, title)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (link) DO NOTHING;
-        """
-        
-        try:
-            with self.connection.cursor() as cursor:
-                cursor.executemany(insert_query, links_data)
-                self.connection.commit()
-                self.logger.info(f"Batch inserted {len(links_data)} news links")
-                
-        except Exception as e:
-            self.logger.error(f"Error batch inserting news links: {str(e)}")
-            self.connection.rollback()
-            raise
-    
     def insert_news_article(self, source, published_date, title, summary, content, tags, link_id):
-        """Insert a news article into the database with datetime published_date"""
+        """Insert a single news article"""
         insert_query = """
         INSERT INTO news (source, published_date, title, summary, content, tags, link_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -240,22 +166,17 @@ class DatabaseManager:
         """
         
         try:
-            with self.connection.cursor() as cursor:
+            with self.get_cursor() as cursor:
                 cursor.execute(insert_query, (source, published_date, title, summary, content, tags, link_id))
-                result = cursor.fetchone()
-                self.connection.commit()
-                
-                if result:
-                    self.logger.debug(f"Inserted news article: {title[:50] if title else 'No title'}...")
-                    return result[0]
-                    
+                news_id = cursor.fetchone()['id']
+                self.logger.debug(f"Inserted news article with ID: {news_id}")
+                return news_id
         except Exception as e:
             self.logger.error(f"Error inserting news article: {str(e)}")
-            self.connection.rollback()
             raise
     
     def get_unprocessed_links(self, source=None, limit=None):
-        """Get unprocessed news links"""
+        """Get unprocessed links with laptop-friendly limits"""
         query = "SELECT * FROM news_links WHERE has_processed = FALSE"
         params = []
         
@@ -265,15 +186,17 @@ class DatabaseManager:
         
         query += " ORDER BY created_at ASC"
         
-        if limit:
-            query += " LIMIT %s"
-            params.append(limit)
+        # Default limit for laptop performance
+        if limit is None:
+            limit = 50  # Smaller default for laptops
+        
+        query += " LIMIT %s"
+        params.append(limit)
         
         try:
-            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            with self.get_cursor(commit=False) as cursor:
                 cursor.execute(query, params)
-                return cursor.fetchall()
-                
+                return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             self.logger.error(f"Error fetching unprocessed links: {str(e)}")
             raise
@@ -287,56 +210,55 @@ class DatabaseManager:
         """
         
         try:
-            with self.connection.cursor() as cursor:
+            with self.get_cursor() as cursor:
                 cursor.execute(update_query, (link_id,))
-                self.connection.commit()
                 self.logger.debug(f"Marked link {link_id} as processed")
-                
         except Exception as e:
             self.logger.error(f"Error marking link as processed: {str(e)}")
-            self.connection.rollback()
             raise
     
-    def get_news_articles(self, source=None, limit=None):
-        """Get news articles from database"""
-        query = "SELECT * FROM news"
-        params = []
-        
-        if source:
-            query += " WHERE source = %s"
-            params.append(source)
-        
-        query += " ORDER BY created_at DESC"
-        
-        if limit:
-            query += " LIMIT %s"
-            params.append(limit)
-        
-        try:
-            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, params)
-                return cursor.fetchall()
-                
-        except Exception as e:
-            self.logger.error(f"Error fetching news articles: {str(e)}")
-            raise
-    
-    def get_news_statistics(self):
-        """Get statistics about news and links"""
+    def get_processing_statistics(self):
+        """Get basic processing statistics"""
         stats_query = """
         SELECT 
-            (SELECT COUNT(*) FROM news_links) as total_links,
-            (SELECT COUNT(*) FROM news_links WHERE has_processed = TRUE) as processed_links,
-            (SELECT COUNT(*) FROM news_links WHERE has_processed = FALSE) as unprocessed_links,
-            (SELECT COUNT(*) FROM news) as total_articles,
-            (SELECT COUNT(DISTINCT source) FROM news) as sources_count
+            COUNT(*) as total_links,
+            COUNT(*) FILTER (WHERE has_processed = TRUE) as processed_links,
+            COUNT(*) FILTER (WHERE has_processed = FALSE) as unprocessed_links,
+            COUNT(DISTINCT source) as sources_count,
+            (SELECT COUNT(*) FROM news) as total_articles
+        FROM news_links;
         """
         
         try:
-            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            with self.get_cursor(commit=False) as cursor:
                 cursor.execute(stats_query)
-                return cursor.fetchone()
-                
+                return dict(cursor.fetchone())
         except Exception as e:
             self.logger.error(f"Error fetching statistics: {str(e)}")
+            raise
+    
+    def bulk_insert_links(self, links_data):
+        """Bulk insert news links efficiently"""
+        if not links_data:
+            return
+        
+        insert_query = """
+        INSERT INTO news_links (source, link, date)
+        VALUES %s
+        ON CONFLICT (link) DO NOTHING;
+        """
+        
+        try:
+            from psycopg2.extras import execute_values
+            
+            # Prepare data tuples
+            values = [(item['source'], item['link'], item['date']) for item in links_data]
+            
+            with self.get_cursor() as cursor:
+                execute_values(cursor, insert_query, values, template=None, page_size=100)
+                
+            self.logger.info(f"Bulk inserted {len(links_data)} links")
+            
+        except Exception as e:
+            self.logger.error(f"Error in bulk insert: {str(e)}")
             raise 
