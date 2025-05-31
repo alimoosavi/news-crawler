@@ -1,6 +1,6 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
+from datetime import datetime, date
 import logging
 from config import settings
 import threading
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Database manager optimized for laptop resources
+    Database manager optimized for laptop resources with Shamsi date support
     """
     
     def __init__(self):
@@ -84,7 +84,7 @@ class DatabaseManager:
             return False
     
     def create_news_links_table(self):
-        """Create the news_links table if it doesn't exist"""
+        """Create the news_links table with Shamsi date support"""
         if self.table_exists('news_links'):
             self.logger.info("news_links table already exists")
             return True
@@ -93,32 +93,40 @@ class DatabaseManager:
         CREATE TABLE news_links (
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
-            link TEXT NOT NULL UNIQUE,
-            date DATE,
-            published_datetime TIMESTAMPTZ,  -- Zone-aware datetime from Shamsi
+            link TEXT UNIQUE NOT NULL,
+            date DATE,  -- Gregorian date for compatibility
+            published_datetime TIMESTAMPTZ,  -- Zone-aware datetime
+            
+            -- Shamsi date fields
+            shamsi_year INTEGER,
+            shamsi_month INTEGER,
+            shamsi_day INTEGER,
+            shamsi_date_string VARCHAR(20),  -- e.g., "1403/03/05"
+            
             has_processed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Lightweight indexes for laptop
-        CREATE INDEX idx_news_links_processed ON news_links (has_processed) WHERE has_processed = FALSE;
+        -- Indexes for performance
         CREATE INDEX idx_news_links_source ON news_links (source);
-        CREATE INDEX idx_news_links_published ON news_links (published_datetime DESC);
+        CREATE INDEX idx_news_links_processed ON news_links (has_processed) WHERE has_processed = FALSE;
         CREATE INDEX idx_news_links_date ON news_links (date DESC);
+        CREATE INDEX idx_news_links_shamsi ON news_links (shamsi_year DESC, shamsi_month DESC, shamsi_day DESC);
+        CREATE INDEX idx_news_links_shamsi_date ON news_links (shamsi_date_string);
         """
         
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(create_table_query)
-            self.logger.info("news_links table created successfully")
+            self.logger.info("news_links table created successfully with Shamsi date support")
             return True
         except Exception as e:
             self.logger.error(f"Error creating news_links table: {str(e)}")
             return False
     
     def create_news_table(self):
-        """Create the news table if it doesn't exist"""
+        """Create the news table with Shamsi date support"""
         if self.table_exists('news'):
             self.logger.info("news table already exists")
             return True
@@ -127,22 +135,34 @@ class DatabaseManager:
         CREATE TABLE news (
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
-            published_date DATE,
+            published_date DATE,  -- Gregorian date
             published_datetime TIMESTAMPTZ,  -- Zone-aware datetime
+            
+            -- Shamsi date fields
+            shamsi_year INTEGER,
+            shamsi_month INTEGER,
+            shamsi_day INTEGER,
+            shamsi_date_string VARCHAR(20),  -- e.g., "1403/03/05"
+            shamsi_month_name VARCHAR(20),   -- e.g., "خرداد"
+            
             title TEXT NOT NULL,
             summary TEXT,
             content TEXT,
             tags TEXT[],
+            author VARCHAR(255),
             link_id INTEGER REFERENCES news_links(id),
             has_processed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Lightweight indexes
+        -- Indexes
         CREATE INDEX idx_news_source ON news (source);
         CREATE INDEX idx_news_published_date ON news (published_date DESC);
         CREATE INDEX idx_news_published_datetime ON news (published_datetime DESC);
+        CREATE INDEX idx_news_shamsi ON news (shamsi_year DESC, shamsi_month DESC, shamsi_day DESC);
+        CREATE INDEX idx_news_shamsi_date ON news (shamsi_date_string);
+        CREATE INDEX idx_news_shamsi_month ON news (shamsi_month_name);
         CREATE INDEX idx_news_link_id ON news (link_id);
         CREATE INDEX idx_news_processed ON news (has_processed) WHERE has_processed = FALSE;
         CREATE INDEX idx_news_title ON news USING gin(to_tsvector('english', title));
@@ -151,7 +171,7 @@ class DatabaseManager:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(create_table_query)
-            self.logger.info("news table created successfully")
+            self.logger.info("news table created successfully with Shamsi date support")
             return True
         except Exception as e:
             self.logger.error(f"Error creating news table: {str(e)}")
@@ -168,21 +188,36 @@ class DatabaseManager:
             self.logger.error(f"Error creating tables: {str(e)}")
             return False
     
-    def insert_news_link(self, source, link, date=None, published_datetime=None):
-        """Insert a single news link with optional datetime"""
+    def insert_news_link(self, source, link, date=None, published_datetime=None, 
+                        shamsi_year=None, shamsi_month=None, shamsi_day=None):
+        """Insert a single news link with Shamsi date support"""
+        
+        # Generate Shamsi date string if components are provided
+        shamsi_date_string = None
+        if shamsi_year and shamsi_month and shamsi_day:
+            shamsi_date_string = f"{shamsi_year:04d}/{shamsi_month:02d}/{shamsi_day:02d}"
+        
         insert_query = """
-        INSERT INTO news_links (source, link, date, published_datetime)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO news_links (source, link, date, published_datetime, 
+                               shamsi_year, shamsi_month, shamsi_day, shamsi_date_string)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (link) DO UPDATE SET
             date = EXCLUDED.date,
             published_datetime = EXCLUDED.published_datetime,
+            shamsi_year = EXCLUDED.shamsi_year,
+            shamsi_month = EXCLUDED.shamsi_month,
+            shamsi_day = EXCLUDED.shamsi_day,
+            shamsi_date_string = EXCLUDED.shamsi_date_string,
             updated_at = CURRENT_TIMESTAMP
         RETURNING id;
         """
         
         try:
             with self.get_cursor() as cursor:
-                cursor.execute(insert_query, (source, link, date, published_datetime))
+                cursor.execute(insert_query, (
+                    source, link, date, published_datetime,
+                    shamsi_year, shamsi_month, shamsi_day, shamsi_date_string
+                ))
                 link_id = cursor.fetchone()['id']
                 self.logger.debug(f"Inserted/updated news link with ID: {link_id}")
                 return link_id
@@ -190,17 +225,34 @@ class DatabaseManager:
             self.logger.error(f"Error inserting news link: {str(e)}")
             raise
     
-    def insert_news_article(self, source, published_date, title, summary, content, tags, link_id, published_datetime=None):
-        """Insert a single news article with has_processed=FALSE by default"""
+    def insert_news_article(self, source, published_date, title, summary, content, tags, link_id, 
+                           published_datetime=None, shamsi_year=None, shamsi_month=None, 
+                           shamsi_day=None, author=None):
+        """Insert a single news article with Shamsi date support"""
+        
+        # Generate Shamsi date string and month name
+        shamsi_date_string = None
+        shamsi_month_name = None
+        
+        if shamsi_year and shamsi_month and shamsi_day:
+            shamsi_date_string = f"{shamsi_year:04d}/{shamsi_month:02d}/{shamsi_day:02d}"
+            shamsi_month_name = self._get_shamsi_month_name(shamsi_month)
+        
         insert_query = """
-        INSERT INTO news (source, published_date, published_datetime, title, summary, content, tags, link_id, has_processed)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO news (source, published_date, published_datetime, title, summary, content, 
+                         tags, link_id, has_processed, shamsi_year, shamsi_month, shamsi_day,
+                         shamsi_date_string, shamsi_month_name, author)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
         """
         
         try:
             with self.get_cursor() as cursor:
-                cursor.execute(insert_query, (source, published_date, published_datetime, title, summary, content, tags, link_id, False))
+                cursor.execute(insert_query, (
+                    source, published_date, published_datetime, title, summary, content, 
+                    tags, link_id, False, shamsi_year, shamsi_month, shamsi_day,
+                    shamsi_date_string, shamsi_month_name, author
+                ))
                 news_id = cursor.fetchone()['id']
                 self.logger.debug(f"Inserted news article with ID: {news_id}")
                 return news_id
@@ -410,4 +462,94 @@ class DatabaseManager:
                 return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             self.logger.error(f"Error fetching news by date range: {str(e)}")
-            raise 
+            raise
+    
+    def get_news_by_shamsi_date_range(self, start_shamsi_date, end_shamsi_date, source=None, processed_only=True):
+        """Get news articles within a Shamsi date range"""
+        query = """
+        SELECT n.*, nl.link, nl.shamsi_date_string as link_shamsi_date
+        FROM news n
+        JOIN news_links nl ON n.link_id = nl.id
+        WHERE n.shamsi_date_string BETWEEN %s AND %s
+        """
+        params = [start_shamsi_date, end_shamsi_date]
+        
+        if source:
+            query += " AND n.source = %s"
+            params.append(source)
+        
+        if processed_only:
+            query += " AND n.has_processed = TRUE"
+        
+        query += " ORDER BY n.shamsi_year DESC, n.shamsi_month DESC, n.shamsi_day DESC"
+        
+        try:
+            with self.get_cursor(commit=False) as cursor:
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            self.logger.error(f"Error fetching news by Shamsi date range: {str(e)}")
+            raise
+    
+    def get_news_by_shamsi_month(self, shamsi_year, shamsi_month, source=None):
+        """Get news articles for a specific Shamsi month"""
+        query = """
+        SELECT n.*, nl.link
+        FROM news n
+        JOIN news_links nl ON n.link_id = nl.id
+        WHERE n.shamsi_year = %s AND n.shamsi_month = %s
+        """
+        params = [shamsi_year, shamsi_month]
+        
+        if source:
+            query += " AND n.source = %s"
+            params.append(source)
+        
+        query += " ORDER BY n.shamsi_day DESC"
+        
+        try:
+            with self.get_cursor(commit=False) as cursor:
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            self.logger.error(f"Error fetching news by Shamsi month: {str(e)}")
+            raise
+    
+    def get_shamsi_date_statistics(self, source=None):
+        """Get statistics grouped by Shamsi dates"""
+        query = """
+        SELECT 
+            shamsi_year,
+            shamsi_month,
+            shamsi_month_name,
+            COUNT(*) as article_count,
+            COUNT(CASE WHEN has_processed = TRUE THEN 1 END) as processed_count
+        FROM news
+        """
+        params = []
+        
+        if source:
+            query += " WHERE source = %s"
+            params.append(source)
+        
+        query += """
+        GROUP BY shamsi_year, shamsi_month, shamsi_month_name
+        ORDER BY shamsi_year DESC, shamsi_month DESC
+        """
+        
+        try:
+            with self.get_cursor(commit=False) as cursor:
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            self.logger.error(f"Error fetching Shamsi date statistics: {str(e)}")
+            raise
+    
+    def _get_shamsi_month_name(self, month_number):
+        """Get Shamsi month name from number"""
+        month_names = {
+            1: 'فروردین', 2: 'اردیبهشت', 3: 'خرداد', 4: 'تیر',
+            5: 'مرداد', 6: 'شهریور', 7: 'مهر', 8: 'آبان',
+            9: 'آذر', 10: 'دی', 11: 'بهمن', 12: 'اسفند'
+        }
+        return month_names.get(month_number, 'نامشخص') 

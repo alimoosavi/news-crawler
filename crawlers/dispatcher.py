@@ -6,23 +6,25 @@ from typing import Dict, List, Optional, Set
 from datetime import datetime
 from database_manager import DatabaseManager
 from config import settings
+from news_sources import NewsSourceInterface
 
 logger = logging.getLogger(__name__)
 
 class NewsLinkDispatcher:
     """
-    Dispatcher optimized for laptop resources
+    Generic dispatcher that works with any news source
     """
     
-    def __init__(self, db_manager: DatabaseManager = None):
+    def __init__(self, news_source: NewsSourceInterface, db_manager: DatabaseManager = None):
+        self.news_source = news_source  # Injected dependency
         self.db_manager = db_manager or DatabaseManager()
         
         # Laptop-optimized configuration
-        self.bulk_size = min(settings.crawler.bulk_size, 20)  # Cap at 20 for laptops
-        self.max_workers = min(settings.crawler.max_workers, 6)  # Cap at 6 workers
+        self.bulk_size = min(settings.crawler.bulk_size, 20)
+        self.max_workers = min(settings.crawler.max_workers, 6)
         self.sleep_interval = settings.crawler.sleep_interval
         
-        # Simple task management
+        # Task management
         self.task_queue = Queue(maxsize=self.bulk_size * 2)
         self.result_queue = Queue()
         
@@ -30,7 +32,7 @@ class NewsLinkDispatcher:
         self.processing_cache: Set[int] = set()
         self.cache_lock = threading.RLock()
         
-        # Simple statistics
+        # Statistics
         self.stats = {
             'total_dispatched': 0,
             'total_completed': 0,
@@ -44,10 +46,11 @@ class NewsLinkDispatcher:
         self.fetcher_thread = None
         self.result_processor_thread = None
         
-        logger.info(f"Dispatcher initialized: bulk_size={self.bulk_size}, max_workers={self.max_workers}")
+        logger.info(f"Dispatcher initialized for {self.news_source.source_name}: "
+                   f"bulk_size={self.bulk_size}, max_workers={self.max_workers}")
     
     def start(self):
-        """Start the lightweight dispatcher"""
+        """Start the dispatcher"""
         if self.running:
             logger.warning("Dispatcher is already running")
             return
@@ -58,18 +61,18 @@ class NewsLinkDispatcher:
         if not self.db_manager.connection:
             self.db_manager.connect()
         
-        # Start lightweight background threads
+        # Start background threads
         self.fetcher_thread = threading.Thread(target=self._fetch_links_loop, daemon=True)
         self.result_processor_thread = threading.Thread(target=self._process_results_loop, daemon=True)
         
         self.fetcher_thread.start()
         self.result_processor_thread.start()
         
-        logger.info("🚀 Dispatcher started")
+        logger.info(f"🚀 Dispatcher started for {self.news_source.source_name}")
     
     def stop(self):
         """Stop the dispatcher"""
-        logger.info("🛑 Stopping dispatcher...")
+        logger.info(f"🛑 Stopping dispatcher for {self.news_source.source_name}...")
         self.running = False
         
         # Wait for threads
@@ -83,7 +86,7 @@ class NewsLinkDispatcher:
         with self.cache_lock:
             self.processing_cache.clear()
         
-        logger.info("✅ Dispatcher stopped")
+        logger.info(f"✅ Dispatcher stopped for {self.news_source.source_name}")
     
     def get_task(self, timeout: float = 2.0) -> Optional[Dict]:
         """Get a task for a worker"""
@@ -114,7 +117,7 @@ class NewsLinkDispatcher:
     
     def _fetch_links_loop(self):
         """Background thread to fetch and queue links"""
-        logger.info("🔄 Link fetcher thread started")
+        logger.info(f"🔄 Link fetcher thread started for {self.news_source.source_name}")
         
         while self.running:
             try:
@@ -127,9 +130,9 @@ class NewsLinkDispatcher:
                 
             except Exception as e:
                 logger.error(f"Error in fetch loop: {str(e)}")
-                time.sleep(5)  # Longer sleep on error
+                time.sleep(5)
         
-        logger.info("🏁 Link fetcher thread stopped")
+        logger.info(f"🏁 Link fetcher thread stopped for {self.news_source.source_name}")
     
     def _fetch_and_queue_links(self):
         """Fetch unprocessed links and add to queue"""
@@ -138,7 +141,7 @@ class NewsLinkDispatcher:
             with self.cache_lock:
                 excluded_ids = self.processing_cache.copy()
             
-            # Fetch links excluding those being processed
+            # Fetch links for this specific news source
             links = self._get_unprocessed_links_excluding(excluded_ids)
             
             # Queue the links
@@ -154,15 +157,19 @@ class NewsLinkDispatcher:
                     break  # Queue is full
             
             if queued_count > 0:
-                logger.debug(f"📋 Queued {queued_count} new tasks")
+                logger.debug(f"📋 Queued {queued_count} new tasks for {self.news_source.source_name}")
         
         except Exception as e:
             logger.error(f"Error fetching and queuing links: {str(e)}")
     
     def _get_unprocessed_links_excluding(self, excluded_ids: Set[int]) -> List[Dict]:
-        """Get unprocessed links excluding cached ones"""
+        """Get unprocessed links for this news source, excluding cached ones"""
         try:
-            all_links = self.db_manager.get_unprocessed_links(source='ISNA', limit=self.bulk_size)
+            # Get links specifically for this news source
+            all_links = self.db_manager.get_unprocessed_links(
+                source=self.news_source.source_name, 
+                limit=self.bulk_size
+            )
             
             # Filter out excluded IDs
             filtered_links = [link for link in all_links if link['id'] not in excluded_ids]
@@ -175,7 +182,7 @@ class NewsLinkDispatcher:
     
     def _process_results_loop(self):
         """Background thread to process results"""
-        logger.info("🔄 Result processor thread started")
+        logger.info(f"🔄 Result processor thread started for {self.news_source.source_name}")
         
         while self.running:
             try:
@@ -195,38 +202,53 @@ class NewsLinkDispatcher:
             except Empty:
                 break
         
-        logger.info("🏁 Result processor thread stopped")
+        logger.info(f"🏁 Result processor thread stopped for {self.news_source.source_name}")
     
     def _handle_worker_result(self, result: Dict):
-        """Handle a single result from a worker"""
+        """Handle a single result from a worker with Shamsi date support"""
         link_id = result.get('link_id')
         success = result.get('success', False)
         
         try:
             if success:
-                # Store the news article
+                # Store the news article with Shamsi date support
                 news_data = result.get('news_data', {})
                 
                 news_id = self.db_manager.insert_news_article(
-                    source='ISNA',
+                    source=self.news_source.source_name,
                     published_date=news_data.get('published_date'),
                     title=news_data.get('title'),
                     summary=news_data.get('summary'),
                     content=news_data.get('content'),
                     tags=news_data.get('tags'),
-                    link_id=link_id
+                    link_id=link_id,
+                    published_datetime=news_data.get('published_datetime'),
+                    shamsi_year=news_data.get('shamsi_year'),
+                    shamsi_month=news_data.get('shamsi_month'),
+                    shamsi_day=news_data.get('shamsi_day'),
+                    author=news_data.get('author')
                 )
                 
                 # Mark as processed
                 self.db_manager.mark_link_processed(link_id)
                 
                 self.stats['total_completed'] += 1
-                logger.info(f"✅ Processed link {link_id}: {news_data.get('title', 'No title')[:50]}...")
+                
+                # Enhanced logging with Shamsi date
+                title_preview = news_data.get('title', 'No title')[:50]
+                shamsi_info = ""
+                if news_data.get('shamsi_year'):
+                    shamsi_date = f"{news_data['shamsi_year']}/{news_data['shamsi_month']:02d}/{news_data['shamsi_day']:02d}"
+                    shamsi_month_name = news_data.get('shamsi_month_name', '')
+                    shamsi_info = f" [{shamsi_date} - {shamsi_month_name}]"
+                
+                logger.info(f"✅ Processed {self.news_source.source_name} link {link_id}: "
+                           f"{title_preview}...{shamsi_info}")
                 
             else:
                 error = result.get('error', 'Unknown error')
                 self.stats['total_failed'] += 1
-                logger.error(f"❌ Failed link {link_id}: {error}")
+                logger.error(f"❌ Failed {self.news_source.source_name} link {link_id}: {error}")
         
         except Exception as e:
             logger.error(f"Error handling result for link {link_id}: {str(e)}")

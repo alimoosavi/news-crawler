@@ -7,29 +7,32 @@ from crawlers.dispatcher import NewsLinkDispatcher
 from crawlers.worker import NewsWorker
 from database_manager import DatabaseManager
 from config import settings
+from news_sources import NewsSourceInterface
 
 logger = logging.getLogger(__name__)
 
 class CrawlerOrchestrator:
     """
-    Orchestrator optimized for laptop resources
+    Generic orchestrator that works with any news source
     """
     
-    def __init__(self):
+    def __init__(self, news_source: NewsSourceInterface):
+        self.news_source = news_source  # Injected dependency
         self.db_manager = DatabaseManager()
         self.dispatcher = None
         self.workers: List[NewsWorker] = []
         self.worker_threads: List[threading.Thread] = []
         
         # Laptop-optimized configuration
-        self.max_workers = min(settings.crawler.max_workers, 4)  # Cap at 4 for laptops
+        self.max_workers = min(settings.crawler.max_workers, 4)
         self.running = False
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
-        logger.info(f"Orchestrator initialized with {self.max_workers} workers")
+        logger.info(f"Orchestrator initialized for {self.news_source.source_name} "
+                   f"with {self.max_workers} workers")
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
@@ -37,12 +40,12 @@ class CrawlerOrchestrator:
         self.stop()
     
     def start(self):
-        """Start the laptop-optimized system"""
+        """Start the system"""
         if self.running:
             logger.warning("Orchestrator is already running")
             return
         
-        logger.info("🚀 Starting news crawler")
+        logger.info(f"🚀 Starting {self.news_source.source_name} crawler")
         self.running = True
         
         try:
@@ -55,10 +58,10 @@ class CrawlerOrchestrator:
             # Start workers
             self._start_workers()
             
-            # Start lightweight monitoring
+            # Start monitoring
             self._start_monitoring()
             
-            logger.info("✅ Crawler started successfully")
+            logger.info(f"✅ {self.news_source.source_name} crawler started successfully")
             
         except Exception as e:
             logger.error(f"Failed to start orchestrator: {str(e)}")
@@ -70,7 +73,7 @@ class CrawlerOrchestrator:
         if not self.running:
             return
         
-        logger.info("🛑 Stopping crawler...")
+        logger.info(f"🛑 Stopping {self.news_source.source_name} crawler...")
         self.running = False
         
         # Stop workers
@@ -82,7 +85,7 @@ class CrawlerOrchestrator:
         # Cleanup database
         self._cleanup_database()
         
-        logger.info("✅ Crawler stopped")
+        logger.info(f"✅ {self.news_source.source_name} crawler stopped")
     
     def _setup_database(self):
         """Setup database connection"""
@@ -96,33 +99,33 @@ class CrawlerOrchestrator:
             raise
     
     def _start_dispatcher(self):
-        """Start the dispatcher"""
+        """Start the dispatcher with news source injection"""
         try:
-            self.dispatcher = NewsLinkDispatcher(self.db_manager)
+            self.dispatcher = NewsLinkDispatcher(self.news_source, self.db_manager)
             self.dispatcher.start()
-            logger.info("📡 Dispatcher started")
+            logger.info(f"📡 Dispatcher started for {self.news_source.source_name}")
         except Exception as e:
             logger.error(f"Failed to start dispatcher: {str(e)}")
             raise
     
     def _start_workers(self):
-        """Start worker threads"""
+        """Start worker threads with news source injection"""
         try:
             for worker_id in range(self.max_workers):
-                # Create worker
-                worker = NewsWorker(worker_id, self.dispatcher)
+                # Create worker with injected news source
+                worker = NewsWorker(worker_id, self.dispatcher, self.news_source)
                 self.workers.append(worker)
                 
                 # Create worker thread
                 worker_thread = threading.Thread(
                     target=worker.start,
-                    name=f"Worker-{worker_id}",
+                    name=f"Worker-{worker_id}-{self.news_source.source_name}",
                     daemon=True
                 )
                 self.worker_threads.append(worker_thread)
                 worker_thread.start()
                 
-                logger.info(f"👷 Worker {worker_id} started")
+                logger.info(f"👷 Worker {worker_id} started for {self.news_source.source_name}")
                 
                 # Small delay to avoid resource spikes
                 time.sleep(1)
@@ -160,17 +163,17 @@ class CrawlerOrchestrator:
             logger.info("📊 Database closed")
     
     def _start_monitoring(self):
-        """Start lightweight monitoring"""
+        """Start monitoring"""
         monitoring_thread = threading.Thread(
             target=self._monitoring_loop,
-            name="Monitor",
+            name=f"Monitor-{self.news_source.source_name}",
             daemon=True
         )
         monitoring_thread.start()
-        logger.info("📈 Monitoring started")
+        logger.info(f"📈 Monitoring started for {self.news_source.source_name}")
     
     def _monitoring_loop(self):
-        """Simple monitoring loop"""
+        """Monitoring loop"""
         while self.running:
             try:
                 time.sleep(120)  # Every 2 minutes
@@ -186,11 +189,11 @@ class CrawlerOrchestrator:
                 logger.error(f"Error in monitoring: {str(e)}")
     
     def _log_stats(self, stats: dict):
-        """Log simple statistics"""
+        """Log statistics"""
         try:
             db_stats = self.db_manager.get_processing_statistics()
             
-            logger.info("📊 System Status:")
+            logger.info(f"📊 {self.news_source.source_name} System Status:")
             logger.info(f"   Workers: {stats['system']['active_workers']}/{stats['system']['workers_count']}")
             logger.info(f"   Database: {db_stats['unprocessed_links']} unprocessed, "
                        f"{db_stats['total_articles']} articles")
@@ -209,7 +212,8 @@ class CrawlerOrchestrator:
             'system': {
                 'running': self.running,
                 'workers_count': len(self.workers),
-                'active_workers': sum(1 for w in self.workers if w.running)
+                'active_workers': sum(1 for w in self.workers if w.running),
+                'source': self.news_source.source_name
             },
             'dispatcher': {},
             'workers': []

@@ -7,25 +7,20 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from crawlers.isna.page_parser import extract_news_article
 from config import settings
+from news_sources import NewsSourceInterface
 
 logger = logging.getLogger(__name__)
 
 class NewsWorker:
     """
-    Worker process for crawling and extracting news articles.
-    
-    Responsibilities:
-    - Get tasks from dispatcher
-    - Crawl news pages using Selenium
-    - Extract article data
-    - Submit results back to dispatcher
+    Generic news worker that can work with any news source
     """
     
-    def __init__(self, worker_id: int, dispatcher):
+    def __init__(self, worker_id: int, dispatcher, news_source: NewsSourceInterface):
         self.worker_id = worker_id
         self.dispatcher = dispatcher
+        self.news_source = news_source  # Injected dependency
         self.selenium_config = settings.selenium
         
         # Worker state
@@ -38,7 +33,7 @@ class NewsWorker:
             'start_time': None
         }
         
-        logger.info(f"Worker {self.worker_id} initialized")
+        logger.info(f"Worker {self.worker_id} initialized for {self.news_source.source_name}")
     
     def start(self):
         """Start the worker"""
@@ -144,13 +139,7 @@ class NewsWorker:
     
     def _process_task(self, task: Dict) -> Dict:
         """
-        Process a single crawling task
-        
-        Args:
-            task: Task dictionary containing link information
-            
-        Returns:
-            Result dictionary
+        Process a single crawling task with Shamsi date support
         """
         link_id = task['id']
         url = task['link']
@@ -165,6 +154,10 @@ class NewsWorker:
         try:
             logger.info(f"🕷️ Worker {self.worker_id} crawling: {url}")
             
+            # Validate link belongs to this news source
+            if not self.news_source.validate_link(url):
+                raise Exception(f"Link does not belong to {self.news_source.source_name}")
+            
             # Navigate to the page
             self.driver.get(url)
             
@@ -176,20 +169,26 @@ class NewsWorker:
             # Get page source
             html_content = self.driver.page_source
             
-            # Extract article data
-            article_data = extract_news_article(html_content)
+            # Extract article data using the injected news source
+            article_data = self.news_source.extract_news_content(html_content, url)
             
             # Validate extracted data
-            if not article_data.get('title'):
-                raise Exception("No title found in article")
+            if not article_data or not article_data.get('title'):
+                raise Exception("No valid content extracted from article")
             
-            # Prepare result
+            # Prepare result with Shamsi date support
             result.update({
                 'success': True,
                 'news_data': article_data
             })
             
-            logger.debug(f"✅ Worker {self.worker_id} successfully processed link {link_id}")
+            # Log with Shamsi date if available
+            shamsi_info = ""
+            if article_data.get('shamsi_year'):
+                shamsi_date = f"{article_data['shamsi_year']}/{article_data['shamsi_month']:02d}/{article_data['shamsi_day']:02d}"
+                shamsi_info = f" ({shamsi_date})"
+            
+            logger.debug(f"✅ Worker {self.worker_id} successfully processed link {link_id}{shamsi_info}")
             
         except Exception as e:
             error_msg = f"Error processing task: {str(e)}"

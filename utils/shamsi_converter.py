@@ -2,14 +2,13 @@ from datetime import datetime, timedelta, date
 import re
 import logging
 import pytz
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
 class ShamsiDateConverter:
     """
-    Converter for Shamsi (Persian) dates to Gregorian dates
-    Handles formats like: "۵ خرداد ۰۴ - ۰۹:۳۲"
+    Enhanced converter for Shamsi (Persian) dates
     """
     
     # Persian to English digit mapping
@@ -25,6 +24,13 @@ class ShamsiDateConverter:
         'آذر': 9, 'دی': 10, 'بهمن': 11, 'اسفند': 12
     }
     
+    # Reverse mapping for month names
+    MONTH_NAMES = {
+        1: 'فروردین', 2: 'اردیبهشت', 3: 'خرداد', 4: 'تیر',
+        5: 'مرداد', 6: 'شهریور', 7: 'مهر', 8: 'آبان',
+        9: 'آذر', 10: 'دی', 11: 'بهمن', 12: 'اسفند'
+    }
+    
     def __init__(self, default_timezone='Asia/Tehran'):
         self.default_tz = pytz.timezone(default_timezone)
     
@@ -37,7 +43,7 @@ class ShamsiDateConverter:
     def parse_shamsi_date_string(self, date_string: str) -> Optional[dict]:
         """
         Parse Shamsi date string like "۵ خرداد ۰۴ - ۰۹:۳۲"
-        Returns dict with day, month, year, hour, minute
+        Returns dict with day, month, year, hour, minute, month_name
         """
         try:
             # Convert Persian digits to English
@@ -61,25 +67,57 @@ class ShamsiDateConverter:
             
             # Find month number
             month = None
+            matched_month_name = None
             for shamsi_month, month_num in self.SHAMSI_MONTHS.items():
                 if month_name in shamsi_month or shamsi_month.startswith(month_name):
                     month = month_num
+                    matched_month_name = shamsi_month
                     break
             
             if month is None:
                 return None
             
+            # Handle 2-digit years (e.g., 04 = 1404)
+            year_int = int(year)
+            if year_int < 100:
+                year_int += 1400 if year_int < 50 else 1300
+            
             return {
                 'day': int(day),
                 'month': int(month),
-                'year': int(year),
+                'year': year_int,
                 'hour': int(hour),
-                'minute': int(minute)
+                'minute': int(minute),
+                'month_name': matched_month_name
             }
             
         except Exception as e:
             print(f"Error parsing Shamsi date '{date_string}': {e}")
             return None
+    
+    def get_shamsi_date_components(self, date_string: str) -> Optional[Tuple[int, int, int, str]]:
+        """
+        Extract Shamsi date components for database storage
+        Returns: (year, month, day, month_name)
+        """
+        parsed = self.parse_shamsi_date_string(date_string)
+        if not parsed:
+            return None
+        
+        return (
+            parsed['year'],
+            parsed['month'], 
+            parsed['day'],
+            parsed['month_name']
+        )
+    
+    def format_shamsi_date(self, year: int, month: int, day: int) -> str:
+        """Format Shamsi date as string"""
+        return f"{year:04d}/{month:02d}/{day:02d}"
+    
+    def get_shamsi_month_name(self, month: int) -> str:
+        """Get Shamsi month name from number"""
+        return self.MONTH_NAMES.get(month, 'نامشخص')
     
     def shamsi_to_gregorian(self, shamsi_year: int, shamsi_month: int, shamsi_day: int) -> Optional[date]:
         """
@@ -162,15 +200,15 @@ class ShamsiDateConverter:
         )
 
 # Convenience functions
-def parse_shamsi_datetime(date_string: str, timezone='Asia/Tehran') -> Optional[datetime]:
-    """Parse Shamsi datetime string to timezone-aware datetime"""
-    converter = ShamsiDateConverter(timezone)
-    return converter.parse_shamsi_datetime(date_string)
-
-def parse_shamsi_date(date_string: str) -> Optional[date]:
-    """Parse Shamsi date string to date object"""
+def extract_shamsi_components(date_string: str) -> Optional[Tuple[int, int, int, str]]:
+    """Extract Shamsi date components from string"""
     converter = ShamsiDateConverter()
-    return converter.parse_shamsi_date_only(date_string)
+    return converter.get_shamsi_date_components(date_string)
+
+def format_shamsi_date(year: int, month: int, day: int) -> str:
+    """Format Shamsi date as string"""
+    converter = ShamsiDateConverter()
+    return converter.format_shamsi_date(year, month, day)
 
 # Example usage
 if __name__ == "__main__":
