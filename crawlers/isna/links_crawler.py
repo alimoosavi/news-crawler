@@ -13,6 +13,7 @@ from database_manager import DatabaseManager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import threading
+import re
 
 class ISNALinksCrawler:
     def __init__(self, base_url="https://www.isna.ir", headless=True, db_manager=None):
@@ -40,7 +41,7 @@ class ISNALinksCrawler:
         try:
             if not self.db_manager.connection:
                 self.db_manager.connect()
-            self.db_manager.create_all_tables()  # Updated to create all tables
+            self.db_manager.create_tables_if_not_exist()
             self.logger.info("Database setup completed")
         except Exception as e:
             self.logger.error(f"Error setting up database: {str(e)}")
@@ -55,351 +56,406 @@ class ISNALinksCrawler:
     def _create_driver(self):
         """Create a new Chrome driver instance"""
         chrome_options = Options()
+        
         if self.headless:
             chrome_options.add_argument("--headless")
+        
+        # Laptop-optimized Chrome options
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-plugins")
+        chrome_options.add_argument("--disable-images")  # Save bandwidth
+        chrome_options.add_argument("--disable-javascript")  # For link extraction only
         
-        # Connect to remote Chrome instance using config
-        driver = webdriver.Remote(
-            command_executor=self.selenium_config.hub_url,
-            options=chrome_options
-        )
-        return driver
-        
-    def setup_driver(self):
-        """Setup Chrome driver with appropriate options"""
-        chrome_options = Options()
-        if self.headless:
-            chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        
-        # Connect to remote Chrome instance using config
-        self.driver = webdriver.Remote(
-            command_executor=self.selenium_config.hub_url,
-            options=chrome_options
-        )
-        
-    def close_driver(self):
-        """Close the Chrome driver"""
-        if self.driver:
-            self.driver.quit()
-    
-    def _close_thread_driver(self):
-        """Close the driver for the current thread"""
-        if hasattr(self._local, 'driver') and self._local.driver:
-            self._local.driver.quit()
-            self._local.driver = None
-            
-    def close_database(self):
-        """Close database connection"""
-        if self.db_manager:
-            self.db_manager.close()
-            
-    def cleanup(self):
-        """Cleanup all resources"""
-        self.close_driver()
-        self._close_thread_driver()
-        self.close_database()
-            
-    def build_archive_url(self, year, month, day, page=1):
-        """Build ISNA archive URL with Shamsi date parameters"""
-        return f"{self.base_url}/page/archive.xhtml?mn={month}&wide=0&dy={day}&ms=0&pi={page}&yr={year}"
-    
-    def extract_news_links_css(self, html_content):
-        """Extract news links from HTML content using CSS selectors"""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Target links within article titles (h3 and h4 tags)
-        news_links = []
-        
-        # Extract from h3 and h4 title links
-        title_links = soup.select('.items h3 a, .items h4 a')
-        
-        for link in title_links:
-            href = link.get('href')
-            title = link.get_text(strip=True)
-            
-            if href:
-                # Convert relative URLs to absolute if needed
-                full_url = self.base_url + href if href.startswith('/') else href
-                news_links.append({
-                    'url': full_url,
-                    'title': title
-                })
-        
-        return news_links
-    
-    def crawl_page(self, year, month, day, page=1, use_thread_driver=False):
-        """Crawl a single page and extract news links"""
-        url = self.build_archive_url(year, month, day, page)
-        
-        # Use thread-local driver for concurrent operations
-        driver = self._get_thread_driver() if use_thread_driver else self.driver
+        # User agent
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         
         try:
-            driver.get(url)
-            
-            # Wait for content to load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "items"))
-            )
-            
-            # Get page source and extract links
-            html_content = driver.page_source
-            news_links = self.extract_news_links_css(html_content)
-            
-            self.logger.info(f"Extracted {len(news_links)} links from page {page}")
-            return news_links
-            
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.set_page_load_timeout(30)
+            driver.implicitly_wait(10)
+            return driver
         except Exception as e:
-            self.logger.error(f"Error crawling page {page}: {str(e)}")
-            return []
+            self.logger.error(f"Error creating Chrome driver: {str(e)}")
+            raise
     
-    def _check_for_duplicates(self, links, seen_urls_set):
-        """Check if links are duplicates of previously seen URLs"""
-        new_links = []
-        duplicate_count = 0
+    def crawl_shamsi_date(self, shamsi_year, shamsi_month, shamsi_day):
+        """
+        Crawl ISNA links for a specific Shamsi date with smart pagination
         
-        for link in links:
-            url = link['url']
-            if url not in seen_urls_set:
-                seen_urls_set.add(url)
-                new_links.append(link)
-            else:
-                duplicate_count += 1
+        Args:
+            shamsi_year: Shamsi year (e.g., 1404)
+            shamsi_month: Shamsi month (1-12)
+            shamsi_day: Shamsi day (1-31)
         
-        return new_links, duplicate_count
-    
-    def crawl_date_pages(self, year, month, day, use_thread_driver=False):
-        """Crawl all pages for a specific date until no more items or duplicates found"""
-        all_links = []
-        page = 1
+        Returns:
+            Number of links found and stored
+        """
+        target_date_str = f"{shamsi_year:04d}/{shamsi_month:02d}/{shamsi_day:02d}"
+        self.logger.info(f"🗓️ Crawling ISNA links for Shamsi date: {target_date_str}")
+        
+        driver = self._get_thread_driver()
+        total_links = 0
+        page_number = 1
         consecutive_empty_pages = 0
-        max_consecutive_empty = 3  # Stop after 3 consecutive empty pages
-        
-        # Use separate seen URLs set for each date
-        seen_urls_set = set()
-        
-        # Setup driver if not using thread driver
-        if not use_thread_driver and not self.driver:
-            self.setup_driver()
+        max_empty_pages = 3
         
         try:
             while True:
-                self.logger.info(f"Crawling page {page} for date {year}/{month}/{day}")
+                self.logger.info(f"📄 Processing page {page_number} for date {target_date_str}")
                 
-                links = self.crawl_page(year, month, day, page, use_thread_driver)
-                
-                # Check if page is empty
-                if not links:
-                    consecutive_empty_pages += 1
-                    self.logger.info(f"Empty page {page}, consecutive empty pages: {consecutive_empty_pages}")
-                    
-                    if consecutive_empty_pages >= max_consecutive_empty:
-                        self.logger.info(f"Stopping after {max_consecutive_empty} consecutive empty pages")
-                        break
-                else:
-                    consecutive_empty_pages = 0  # Reset counter
-                    
-                    # Check for duplicates
-                    new_links, duplicate_count = self._check_for_duplicates(links, seen_urls_set)
-                    
-                    if new_links:
-                        all_links.extend(new_links)
-                        self.logger.info(f"Added {len(new_links)} new links from page {page}")
-                    
-                    # If all links are duplicates, we might be seeing repeated content
-                    if duplicate_count == len(links) and duplicate_count > 0:
-                        self.logger.info(f"All {duplicate_count} links on page {page} are duplicates, stopping")
-                        break
-                
-                page += 1
-                
-                # Add delay between requests
-                time.sleep(2)
-                
-        except Exception as e:
-            self.logger.error(f"Error during crawling: {str(e)}")
-        
-        self.logger.info(f"Completed crawling for {year}/{month}/{day}. Total unique links: {len(all_links)}")
-        return all_links
-    
-    def store_links(self, links, crawl_date):
-        """Store extracted links in database (thread-safe)"""
-        if not links:
-            self.logger.warning("No links to store")
-            return 0
-            
-        # Prepare data for database insertion
-        links_data = []
-        for link_info in links:
-            links_data.append((
-                'ISNA',  # source
-                link_info['url'],  # link
-                crawl_date,  # date
-                link_info.get('title', ''),  # title
-                False  # has_processed
-            ))
-        
-        # Store in database with thread safety
-        with self._db_lock:
-            self.db_manager.insert_news_links_batch(links_data)
-            
-        self.logger.info(f"Successfully stored {len(links_data)} links")
-        return len(links_data)
-    
-    def crawl_and_store(self, year, month, day, use_thread_driver=False):
-        """Complete workflow: crawl links and store them in database"""
-        try:
-            self.logger.info(f"Starting crawl and store for date {year}/{month}/{day}")
-            
-            # Crawl links (automatically stops when appropriate)
-            links = self.crawl_date_pages(year, month, day, use_thread_driver)
-            
-            if not links:
-                self.logger.warning(f"No links found for date {year}/{month}/{day}")
-                return 0
-            
-            # Store links
-            crawl_date = date(year, month, day)
-            stored_count = self.store_links(links, crawl_date)
-            
-            self.logger.info(f"Crawl and store completed. Stored {stored_count} links for date {year}/{month}/{day}")
-            return stored_count
-            
-        except Exception as e:
-            self.logger.error(f"Error during crawl and store: {str(e)}")
-            raise
-    
-    def _crawl_single_date_worker(self, date_tuple):
-        """Worker function for crawling a single date (used in concurrent processing)"""
-        year, month, day = date_tuple
-        thread_id = threading.current_thread().ident
-        
-        try:
-            self.logger.info(f"Thread {thread_id}: Starting crawl for {year}/{month}/{day}")
-            
-            # Use thread-local driver
-            links_count = self.crawl_and_store(year, month, day, use_thread_driver=True)
-            
-            self.logger.info(f"Thread {thread_id}: Completed crawl for {year}/{month}/{day} - {links_count} links")
-            
-            return {
-                'date': (year, month, day),
-                'links_count': links_count,
-                'success': True,
-                'error': None
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Thread {thread_id}: Error crawling {year}/{month}/{day}: {str(e)}")
-            return {
-                'date': (year, month, day),
-                'links_count': 0,
-                'success': False,
-                'error': str(e)
-            }
-        finally:
-            # Clean up thread-local driver
-            self._close_thread_driver()
-    
-    def crawl_dates_batch(self, dates_list, max_workers=3):
-        """
-        Crawl multiple dates concurrently
-        
-        Args:
-            dates_list: List of tuples (year, month, day)
-            max_workers: Maximum number of concurrent threads
-            
-        Returns:
-            Dictionary with results for each date
-        """
-        self.logger.info(f"Starting batch crawl for {len(dates_list)} dates with {max_workers} workers")
-        
-        results = {}
-        total_links = 0
-        successful_dates = 0
-        failed_dates = 0
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_date = {
-                executor.submit(self._crawl_single_date_worker, date_tuple): date_tuple 
-                for date_tuple in dates_list
-            }
-            
-            # Process completed tasks
-            for future in as_completed(future_to_date):
-                date_tuple = future_to_date[future]
+                # Construct archive URL for the page
+                archive_url = self._build_archive_url(shamsi_year, shamsi_month, shamsi_day, page_number)
                 
                 try:
-                    result = future.result()
-                    results[date_tuple] = result
+                    # Load the page
+                    driver.get(archive_url)
+                    time.sleep(2)  # Wait for page to load
                     
-                    if result['success']:
-                        total_links += result['links_count']
-                        successful_dates += 1
-                        self.logger.info(f"✓ {date_tuple}: {result['links_count']} links")
+                    # Extract links from current page
+                    page_links = self._extract_links_from_page(driver.page_source, target_date_str)
+                    
+                    if not page_links:
+                        consecutive_empty_pages += 1
+                        self.logger.warning(f"No links found on page {page_number}")
+                        
+                        if consecutive_empty_pages >= max_empty_pages:
+                            self.logger.info(f"Stopping after {max_empty_pages} consecutive empty pages")
+                            break
+                        
+                        page_number += 1
+                        continue
+                    
+                    # Reset empty page counter
+                    consecutive_empty_pages = 0
+                    
+                    # Check if we've reached the boundary (previous day's content)
+                    boundary_reached = self._check_date_boundary(page_links, target_date_str)
+                    
+                    # Filter links for target date only
+                    target_date_links = [
+                        link for link in page_links 
+                        if link.get('shamsi_date_string') == target_date_str
+                    ]
+                    
+                    if target_date_links:
+                        # Store the links
+                        stored_count = self._store_links_batch(target_date_links)
+                        total_links += stored_count
+                        
+                        self.logger.info(f"✅ Page {page_number}: Found {len(target_date_links)} links for target date, "
+                                       f"stored {stored_count} new links")
                     else:
-                        failed_dates += 1
-                        self.logger.error(f"✗ {date_tuple}: {result['error']}")
+                        self.logger.info(f"📄 Page {page_number}: No links for target date {target_date_str}")
+                    
+                    # If we've reached the boundary, stop crawling
+                    if boundary_reached:
+                        self.logger.info(f"🛑 Reached date boundary at page {page_number}. "
+                                       f"Found content from previous days.")
+                        break
+                    
+                    page_number += 1
+                    
+                    # Safety limit to prevent infinite loops
+                    if page_number > 200:
+                        self.logger.warning(f"Reached maximum page limit (200) for date {target_date_str}")
+                        break
                         
                 except Exception as e:
-                    failed_dates += 1
-                    error_msg = f"Future execution error: {str(e)}"
-                    results[date_tuple] = {
-                        'date': date_tuple,
-                        'links_count': 0,
-                        'success': False,
-                        'error': error_msg
-                    }
-                    self.logger.error(f"✗ {date_tuple}: {error_msg}")
+                    self.logger.error(f"Error processing page {page_number}: {str(e)}")
+                    consecutive_empty_pages += 1
+                    
+                    if consecutive_empty_pages >= max_empty_pages:
+                        break
+                    
+                    page_number += 1
+                    continue
         
-        # Log summary
-        self.logger.info(f"Batch crawl completed:")
-        self.logger.info(f"  Total dates: {len(dates_list)}")
-        self.logger.info(f"  Successful: {successful_dates}")
-        self.logger.info(f"  Failed: {failed_dates}")
-        self.logger.info(f"  Total links: {total_links}")
+        except Exception as e:
+            self.logger.error(f"Error in crawl_shamsi_date: {str(e)}")
         
-        return {
-            'results': results,
-            'summary': {
-                'total_dates': len(dates_list),
-                'successful_dates': successful_dates,
-                'failed_dates': failed_dates,
-                'total_links': total_links
-            }
-        }
+        finally:
+            self.logger.info(f"🏁 Finished crawling {target_date_str}. Total links found: {total_links}")
+        
+        return total_links
     
-    def crawl_date_range(self, start_date, end_date):
-        """Crawl multiple dates in a range"""
-        total_links = 0
-        current_date = start_date
+    def _build_archive_url(self, year, month, day, page=1):
+        """Build ISNA archive URL for specific Shamsi date and page"""
+        # ISNA archive URL format: https://www.isna.ir/archive?service_id=-1&day=YYYY-MM-DD&page=N
+        shamsi_date_str = f"{year:04d}-{month:02d}-{day:02d}"
         
-        while current_date <= end_date:
+        if page == 1:
+            return f"{self.base_url}/archive?service_id=-1&day={shamsi_date_str}"
+        else:
+            return f"{self.base_url}/archive?service_id=-1&day={shamsi_date_str}&page={page}"
+    
+    def _extract_links_from_page(self, html_content, target_date_str):
+        """
+        Extract news links from ISNA archive page with Shamsi date parsing
+        
+        Args:
+            html_content: HTML content of the page
+            target_date_str: Target date string in format "YYYY/MM/DD"
+        
+        Returns:
+            List of dictionaries containing link data with Shamsi dates
+        """
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            links_data = []
+            
+            # Find all news items (li elements with class "text")
+            news_items = soup.find_all('li', class_='text')
+            
+            for item in news_items:
+                try:
+                    link_data = self._extract_single_link_data(item)
+                    if link_data:
+                        links_data.append(link_data)
+                        
+                except Exception as e:
+                    self.logger.debug(f"Error extracting single link: {str(e)}")
+                    continue
+            
+            self.logger.debug(f"Extracted {len(links_data)} links from page")
+            return links_data
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting links from page: {str(e)}")
+            return []
+    
+    def _extract_single_link_data(self, item_element):
+        """
+        Extract data from a single news item element
+        
+        Expected HTML structure:
+        <li class="text">
+            <figure><a href="/news/..."><img src="..." alt="..."></a></figure>
+            <div class="desc">
+                <h3><a href="/news/..." target="_blank">Title</a></h3>
+                <p>Summary text</p>
+                <time><a href="/news/..." target="_blank" title="...">
+                    <span>۱۰</span> خرداد ۰۴ - ۲۱:۱۶
+                </a></time>
+            </div>
+        </li>
+        """
+        try:
+            # Extract link URL
+            link_element = item_element.find('h3').find('a') if item_element.find('h3') else None
+            if not link_element:
+                return None
+            
+            href = link_element.get('href')
+            if not href:
+                return None
+            
+            # Convert relative URL to absolute
+            full_url = self.base_url + href if href.startswith('/') else href
+            
+            # Extract title
+            title = self._clean_text(link_element.get_text())
+            
+            # Extract summary
+            summary_element = item_element.find('p')
+            summary = self._clean_text(summary_element.get_text()) if summary_element else ""
+            
+            # Extract published date from time element
+            time_element = item_element.find('time')
+            if not time_element:
+                return None
+            
+            # Get the date text from time element
+            date_text = self._clean_text(time_element.get_text())
+            
+            # Parse Shamsi date components
+            shamsi_components = self._parse_shamsi_date_from_text(date_text)
+            if not shamsi_components:
+                self.logger.debug(f"Could not parse Shamsi date from: {date_text}")
+                return None
+            
+            # Format Shamsi date string
+            shamsi_date_string = f"{shamsi_components['year']:04d}/{shamsi_components['month']:02d}/{shamsi_components['day']:02d}"
+            
+            # Try to convert to Gregorian for compatibility
+            gregorian_date = self._shamsi_to_gregorian_simple(
+                shamsi_components['year'],
+                shamsi_components['month'], 
+                shamsi_components['day']
+            )
+            
+            return {
+                'source': 'ISNA',
+                'link': full_url,
+                'title': title,
+                'summary': summary,
+                'date': gregorian_date,  # Gregorian date for compatibility
+                'shamsi_year': shamsi_components['year'],
+                'shamsi_month': shamsi_components['month'],
+                'shamsi_day': shamsi_components['day'],
+                'shamsi_date_string': shamsi_date_string,
+                'shamsi_month_name': shamsi_components.get('month_name', ''),
+                'published_datetime': None  # Will be extracted during content crawling
+            }
+            
+        except Exception as e:
+            self.logger.debug(f"Error extracting single link data: {str(e)}")
+            return None
+    
+    def _parse_shamsi_date_from_text(self, date_text):
+        """
+        Parse Shamsi date from text like "۱۰ خرداد ۰۴ - ۲۱:۱۶"
+        
+        Returns:
+            Dict with year, month, day, month_name
+        """
+        try:
+            from utils.shamsi_converter import ShamsiDateConverter
+            converter = ShamsiDateConverter()
+            
+            # Parse the date string
+            parsed = converter.parse_shamsi_date_string(date_text)
+            return parsed
+            
+        except Exception as e:
+            self.logger.debug(f"Error parsing Shamsi date '{date_text}': {str(e)}")
+            return None
+    
+    def _check_date_boundary(self, page_links, target_date_str):
+        """
+        Check if we've reached the boundary (previous day's content)
+        
+        Args:
+            page_links: List of links from current page
+            target_date_str: Target date string "YYYY/MM/DD"
+        
+        Returns:
+            True if boundary reached, False otherwise
+        """
+        if not page_links:
+            return False
+        
+        # Check if any link has a date earlier than target date
+        target_parts = target_date_str.split('/')
+        target_year, target_month, target_day = int(target_parts[0]), int(target_parts[1]), int(target_parts[2])
+        
+        for link in page_links:
+            link_date_str = link.get('shamsi_date_string', '')
+            if not link_date_str:
+                continue
+            
             try:
-                # Convert Gregorian date to Shamsi (simplified - you might want to use a proper library)
-                # For now, assuming the dates are already in Shamsi format
-                links_count = self.crawl_and_store(
-                    current_date.year, 
-                    current_date.month, 
-                    current_date.day
-                )
+                link_parts = link_date_str.split('/')
+                link_year, link_month, link_day = int(link_parts[0]), int(link_parts[1]), int(link_parts[2])
+                
+                # Compare dates
+                if (link_year < target_year or 
+                    (link_year == target_year and link_month < target_month) or
+                    (link_year == target_year and link_month == target_month and link_day < target_day)):
+                    
+                    self.logger.info(f"Found boundary: link date {link_date_str} is before target {target_date_str}")
+                    return True
+                    
+            except (ValueError, IndexError):
+                continue
+        
+        return False
+    
+    def _store_links_batch(self, links_data):
+        """Store a batch of links in the database"""
+        if not links_data:
+            return 0
+        
+        try:
+            with self._db_lock:
+                # Filter out duplicates based on URL
+                new_links = []
+                for link_data in links_data:
+                    if link_data['link'] not in self.seen_urls:
+                        new_links.append(link_data)
+                        self.seen_urls.add(link_data['link'])
+                
+                if new_links:
+                    # Use bulk insert with Shamsi date support
+                    self.db_manager.bulk_insert_news_links(new_links)
+                    return len(new_links)
+                
+                return 0
+                
+        except Exception as e:
+            self.logger.error(f"Error storing links batch: {str(e)}")
+            return 0
+    
+    def _shamsi_to_gregorian_simple(self, shamsi_year, shamsi_month, shamsi_day):
+        """Simple Shamsi to Gregorian conversion"""
+        try:
+            from utils.shamsi_converter import ShamsiDateConverter
+            converter = ShamsiDateConverter()
+            return converter.shamsi_to_gregorian(shamsi_year, shamsi_month, shamsi_day)
+        except Exception:
+            return None
+    
+    def _clean_text(self, text):
+        """Clean and normalize text"""
+        if not text:
+            return ""
+        
+        # Remove extra whitespace and normalize
+        text = ' '.join(text.split())
+        
+        # Remove common unwanted characters
+        text = text.replace('\u200c', ' ')  # Zero-width non-joiner
+        text = text.replace('\u200d', '')   # Zero-width joiner
+        
+        return text.strip()
+    
+    def crawl_date_range(self, start_shamsi_date, end_shamsi_date):
+        """
+        Crawl multiple Shamsi dates in a range
+        
+        Args:
+            start_shamsi_date: Tuple (year, month, day)
+            end_shamsi_date: Tuple (year, month, day)
+        """
+        total_links = 0
+        
+        start_year, start_month, start_day = start_shamsi_date
+        end_year, end_month, end_day = end_shamsi_date
+        
+        current_year, current_month, current_day = start_year, start_month, start_day
+        
+        while True:
+            try:
+                links_count = self.crawl_shamsi_date(current_year, current_month, current_day)
                 total_links += links_count
                 
-                self.logger.info(f"Crawled {links_count} links for {current_date}")
+                self.logger.info(f"Crawled {links_count} links for {current_year}/{current_month:02d}/{current_day:02d}")
+                
+                # Move to next day
+                current_day += 1
+                
+                # Handle month/year overflow (simplified)
+                if current_day > 31:  # Simplified - should use proper Shamsi calendar logic
+                    current_day = 1
+                    current_month += 1
+                    
+                    if current_month > 12:
+                        current_month = 1
+                        current_year += 1
+                
+                # Check if we've reached the end date
+                if (current_year > end_year or 
+                    (current_year == end_year and current_month > end_month) or
+                    (current_year == end_year and current_month == end_month and current_day > end_day)):
+                    break
                 
             except Exception as e:
-                self.logger.error(f"Error crawling date {current_date}: {str(e)}")
-            
-            current_date += timedelta(days=1)
+                self.logger.error(f"Error crawling date {current_year}/{current_month:02d}/{current_day:02d}: {str(e)}")
+                # Continue to next date
+                current_day += 1
         
         return total_links
     
@@ -410,27 +466,8 @@ class ISNALinksCrawler:
     def mark_link_processed(self, link_id):
         """Mark a link as processed"""
         return self.db_manager.mark_link_processed(link_id)
-
-def extract_news_links_css(html_content, base_url=""):
-    """Legacy function for backward compatibility"""
-    soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Target links within article titles (h3 and h4 tags)
-    news_links = []
-    
-    # Extract from h3 and h4 title links
-    title_links = soup.select('.items h3 a, .items h4 a')
-    
-    for link in title_links:
-        href = link.get('href')
-        title = link.get_text(strip=True)
-        
-        if href:
-            # Convert relative URLs to absolute if needed
-            full_url = base_url + href if href.startswith('/') else href
-            news_links.append({
-                'url': full_url,
-                'title': title
-            })
-    
-    return news_links
+    def close(self):
+        """Clean up resources"""
+        if hasattr(self._local, 'driver') and self._local.driver:
+            self._local.driver.quit()

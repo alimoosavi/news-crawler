@@ -180,10 +180,16 @@ class DatabaseManager:
     def create_tables_if_not_exist(self):
         """Create all required tables if they don't exist"""
         try:
-            self.create_news_links_table()
-            self.create_news_table()
-            self.logger.info("All tables verified/created successfully")
-            return True
+            success = True
+            success &= self.create_news_links_table()
+            success &= self.create_news_table()
+            
+            if success:
+                self.logger.info("All tables verified/created successfully")
+            else:
+                self.logger.error("Some tables failed to create")
+                
+            return success
         except Exception as e:
             self.logger.error(f"Error creating tables: {str(e)}")
             return False
@@ -364,37 +370,44 @@ class DatabaseManager:
             raise
     
     def get_processing_statistics(self):
-        """Get comprehensive processing statistics"""
-        stats_query = """
-        SELECT 
-            -- News Links Statistics
-            (SELECT COUNT(*) FROM news_links) as total_links,
-            (SELECT COUNT(*) FROM news_links WHERE has_processed = TRUE) as processed_links,
-            (SELECT COUNT(*) FROM news_links WHERE has_processed = FALSE) as unprocessed_links,
-            (SELECT COUNT(DISTINCT source) FROM news_links) as sources_count,
-            
-            -- News Articles Statistics
-            (SELECT COUNT(*) FROM news) as total_articles,
-            (SELECT COUNT(*) FROM news WHERE has_processed = TRUE) as processed_articles,
-            (SELECT COUNT(*) FROM news WHERE has_processed = FALSE) as unprocessed_articles,
-            
-            -- Recent Activity
-            (SELECT COUNT(*) FROM news WHERE created_at >= NOW() - INTERVAL '1 hour') as articles_last_hour,
-            (SELECT COUNT(*) FROM news WHERE created_at >= NOW() - INTERVAL '1 day') as articles_last_day,
-            (SELECT COUNT(*) FROM news_links WHERE created_at >= NOW() - INTERVAL '1 day') as links_last_day,
-            
-            -- DateTime Statistics
-            (SELECT COUNT(*) FROM news_links WHERE published_datetime IS NOT NULL) as links_with_datetime,
-            (SELECT COUNT(*) FROM news WHERE published_datetime IS NOT NULL) as articles_with_datetime;
-        """
-        
+        """Get processing statistics for monitoring"""
         try:
+            stats_query = """
+            SELECT 
+                COUNT(*) as total_links,
+                COUNT(CASE WHEN has_processed = TRUE THEN 1 END) as processed_links,
+                COUNT(CASE WHEN has_processed = FALSE THEN 1 END) as unprocessed_links,
+                COUNT(DISTINCT source) as sources_count
+            FROM news_links;
+            """
+            
+            news_stats_query = """
+            SELECT COUNT(*) as total_articles FROM news;
+            """
+            
             with self.get_cursor(commit=False) as cursor:
+                # Get link stats
                 cursor.execute(stats_query)
-                return dict(cursor.fetchone())
+                link_stats = dict(cursor.fetchone())
+                
+                # Get news stats
+                cursor.execute(news_stats_query)
+                news_stats = dict(cursor.fetchone())
+                
+                return {
+                    **link_stats,
+                    **news_stats
+                }
+                
         except Exception as e:
-            self.logger.error(f"Error fetching statistics: {str(e)}")
-            raise
+            self.logger.error(f"Error getting processing statistics: {str(e)}")
+            return {
+                'total_links': 0,
+                'processed_links': 0,
+                'unprocessed_links': 0,
+                'sources_count': 0,
+                'total_articles': 0
+            }
     
     def bulk_insert_links(self, links_data):
         """Bulk insert news links efficiently with datetime support"""
@@ -552,4 +565,50 @@ class DatabaseManager:
             5: 'مرداد', 6: 'شهریور', 7: 'مهر', 8: 'آبان',
             9: 'آذر', 10: 'دی', 11: 'بهمن', 12: 'اسفند'
         }
-        return month_names.get(month_number, 'نامشخص') 
+        return month_names.get(month_number, 'نامشخص')
+    
+    def bulk_insert_news_links(self, links_data):
+        """Bulk insert news links with Shamsi date support"""
+        if not links_data:
+            return
+        
+        insert_query = """
+        INSERT INTO news_links (
+            source, link, date, published_datetime,
+            shamsi_year, shamsi_month, shamsi_day, shamsi_date_string
+        ) VALUES %s
+        ON CONFLICT (link) DO UPDATE SET
+            date = EXCLUDED.date,
+            published_datetime = EXCLUDED.published_datetime,
+            shamsi_year = EXCLUDED.shamsi_year,
+            shamsi_month = EXCLUDED.shamsi_month,
+            shamsi_day = EXCLUDED.shamsi_day,
+            shamsi_date_string = EXCLUDED.shamsi_date_string,
+            updated_at = CURRENT_TIMESTAMP;
+        """
+        
+        try:
+            from psycopg2.extras import execute_values
+            
+            # Prepare data tuples with Shamsi date support
+            values = []
+            for item in links_data:
+                values.append((
+                    item['source'], 
+                    item['link'], 
+                    item.get('date'), 
+                    item.get('published_datetime'),
+                    item.get('shamsi_year'),
+                    item.get('shamsi_month'),
+                    item.get('shamsi_day'),
+                    item.get('shamsi_date_string')
+                ))
+            
+            with self.get_cursor() as cursor:
+                execute_values(cursor, insert_query, values, template=None, page_size=100)
+                
+            self.logger.info(f"Bulk inserted {len(links_data)} links with Shamsi dates")
+            
+        except Exception as e:
+            self.logger.error(f"Error in bulk insert with Shamsi dates: {str(e)}")
+            raise 

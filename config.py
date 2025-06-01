@@ -39,6 +39,7 @@ class CrawlerConfig(BaseSettings):
     class Config:
         env_prefix = "CRAWLER_"
         case_sensitive = False
+        
 
 class AppConfig(BaseSettings):
     """Application configuration settings"""
