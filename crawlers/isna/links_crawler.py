@@ -116,7 +116,7 @@ class ISNALinksCrawler:
                     time.sleep(2)  # Wait for page to load
                     
                     # Extract links from current page
-                    page_links = self._extract_links_from_page(driver.page_source, target_date_str)
+                    page_links, boundary_reached = self._extract_links_from_page(driver.page_source, shamsi_year, shamsi_month, shamsi_day)
                     
                     if not page_links:
                         consecutive_empty_pages += 1
@@ -133,29 +133,17 @@ class ISNALinksCrawler:
                     consecutive_empty_pages = 0
                     
                     # Check if we've reached the boundary (previous day's content)
-                    boundary_reached = self._check_date_boundary(page_links, target_date_str)
-                    
-                    # Filter links for target date only
-                    target_date_links = [
-                        link for link in page_links 
-                        if link.get('shamsi_date_string') == target_date_str
-                    ]
-                    
-                    if target_date_links:
-                        # Store the links
-                        stored_count = self._store_links_batch(target_date_links)
-                        total_links += stored_count
-                        
-                        self.logger.info(f"✅ Page {page_number}: Found {len(target_date_links)} links for target date, "
-                                       f"stored {stored_count} new links")
-                    else:
-                        self.logger.info(f"📄 Page {page_number}: No links for target date {target_date_str}")
-                    
-                    # If we've reached the boundary, stop crawling
                     if boundary_reached:
                         self.logger.info(f"🛑 Reached date boundary at page {page_number}. "
                                        f"Found content from previous days.")
                         break
+                    
+                    # Store the links
+                    stored_count = self._store_links_batch(page_links)
+                    total_links += stored_count
+                    
+                    self.logger.info(f"✅ Page {page_number}: Found {len(page_links)} links for target date, "
+                                   f"stored {stored_count} new links")
                     
                     page_number += 1
                     
@@ -192,177 +180,188 @@ class ISNALinksCrawler:
         else:
             return f"{self.base_url}/archive?service_id=-1&day={shamsi_date_str}&page={page}"
     
-    def _extract_links_from_page(self, html_content, target_date_str):
+    def _extract_links_from_page(self, page_source, target_shamsi_year, target_shamsi_month, target_shamsi_day):
         """
-        Extract news links from ISNA archive page with Shamsi date parsing
-        
-        Args:
-            html_content: HTML content of the page
-            target_date_str: Target date string in format "YYYY/MM/DD"
+        Extract links from ISNA page with Shamsi date filtering
         
         Returns:
-            List of dictionaries containing link data with Shamsi dates
+            tuple: (links_for_target_date, has_previous_day_content)
         """
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            links_data = []
+            soup = BeautifulSoup(page_source, 'html.parser')
             
-            # Find all news items (li elements with class "text")
-            news_items = soup.find_all('li', class_='text')
+            # First find the items container
+            items_div = soup.find('div', class_='items')
+            if not items_div:
+                self.logger.warning("No items div found on page")
+                return [], False
+            
+            # Find all li elements within the items div (class can vary)
+            news_items = items_div.find_all('li')
+            
+            links_for_target_date = []
+            has_previous_day_content = False
             
             for item in news_items:
                 try:
-                    link_data = self._extract_single_link_data(item)
-                    if link_data:
-                        links_data.append(link_data)
+                    # Extract link from the first anchor tag
+                    link_tag = item.find('a', href=True)
+                    if not link_tag:
+                        continue
+                    
+                    link = link_tag['href']
+                    if not link.startswith('http'):
+                        link = self.base_url + link
+                    
+                    # Extract title - look for h3 first, then h4
+                    title = "No Title"
+                    title_tag = item.find('h3')
+                    if title_tag:
+                        title_link = title_tag.find('a')
+                        if title_link:
+                            title = self._clean_text(title_link.get_text())
+                    else:
+                        # Try h4 if h3 not found
+                        title_tag = item.find('h4')
+                        if title_tag:
+                            title_link = title_tag.find('a')
+                            if title_link:
+                                title = self._clean_text(title_link.get_text())
+                    
+                    # Extract summary from p tag
+                    summary_tag = item.find('p')
+                    summary = self._clean_text(summary_tag.get_text()) if summary_tag else ""
+                    
+                    # Extract Shamsi date from time element
+                    time_tag = item.find('time')
+                    if not time_tag:
+                        continue
+                    
+                    # Get the title attribute which contains the full date
+                    # "یکشنبه ۱۱ خرداد ۱۴۰۴ - ۲۳:۳۵"
+                    date_text = time_tag.get('title', '')
+                    if not date_text:
+                        # Fallback to text content
+                        date_text = self._clean_text(time_tag.get_text())
+                    
+                    shamsi_components = self._parse_isna_full_date(date_text)
+                    
+                    if not shamsi_components:
+                        continue
+                    
+                    year, month, day, hour, minute = shamsi_components
+                    
+                    # Check if this is the target date
+                    if year == target_shamsi_year and month == target_shamsi_month and day == target_shamsi_day:
+                        # Convert to Gregorian for database compatibility
+                        gregorian_date = self._shamsi_to_gregorian_simple(year, month, day)
                         
+                        # Create timezone-aware datetime
+                        published_datetime = None
+                        if gregorian_date:
+                            try:
+                                import pytz
+                                tehran_tz = pytz.timezone('Asia/Tehran')
+                                dt = datetime.combine(gregorian_date, datetime.min.time().replace(hour=hour, minute=minute))
+                                published_datetime = tehran_tz.localize(dt)
+                            except Exception:
+                                pass
+                        
+                        link_data = {
+                            'source': 'ISNA',
+                            'link': link,
+                            'title': title,
+                            'summary': summary,
+                            'date': gregorian_date,
+                            'published_datetime': published_datetime,
+                            'shamsi_year': year,
+                            'shamsi_month': month,
+                            'shamsi_day': day,
+                            'shamsi_date_string': f"{year:04d}/{month:02d}/{day:02d}"
+                        }
+                        
+                        links_for_target_date.append(link_data)
+                        
+                    elif year < target_shamsi_year or \
+                         (year == target_shamsi_year and month < target_shamsi_month) or \
+                         (year == target_shamsi_year and month == target_shamsi_month and day < target_shamsi_day):
+                        # Found content from previous days - boundary reached
+                        has_previous_day_content = True
+                        self.logger.info(f"Found boundary: {year}/{month:02d}/{day:02d} is before target {target_shamsi_year}/{target_shamsi_month:02d}/{target_shamsi_day:02d}")
+                        break
+                    
                 except Exception as e:
-                    self.logger.debug(f"Error extracting single link: {str(e)}")
+                    self.logger.warning(f"Error processing news item: {str(e)}")
                     continue
             
-            self.logger.debug(f"Extracted {len(links_data)} links from page")
-            return links_data
+            return links_for_target_date, has_previous_day_content
             
         except Exception as e:
             self.logger.error(f"Error extracting links from page: {str(e)}")
-            return []
+            return [], False
     
-    def _extract_single_link_data(self, item_element):
+    def _parse_isna_full_date(self, date_string):
         """
-        Extract data from a single news item element
-        
-        Expected HTML structure:
-        <li class="text">
-            <figure><a href="/news/..."><img src="..." alt="..."></a></figure>
-            <div class="desc">
-                <h3><a href="/news/..." target="_blank">Title</a></h3>
-                <p>Summary text</p>
-                <time><a href="/news/..." target="_blank" title="...">
-                    <span>۱۰</span> خرداد ۰۴ - ۲۱:۱۶
-                </a></time>
-            </div>
-        </li>
+        Parse ISNA full date format like "یکشنبه ۱۱ خرداد ۱۴۰۴ - ۲۳:۳۵"
+        Returns: (year, month, day, hour, minute) or None
         """
         try:
-            # Extract link URL
-            link_element = item_element.find('h3').find('a') if item_element.find('h3') else None
-            if not link_element:
+            # Convert Persian digits to English
+            from utils.shamsi_converter import ShamsiDateConverter
+            converter = ShamsiDateConverter()
+            normalized = converter.persian_to_english_digits(date_string.strip())
+            
+            # Pattern for "weekday day month year - hour:minute"
+            # Example: "یکشنبه 11 خرداد 1404 - 23:35"
+            import re
+            pattern = r'(\w+)\s+(\d+)\s+(\w+)\s+(\d+)\s*-\s*(\d+):(\d+)'
+            match = re.search(pattern, normalized)
+            
+            if not match:
+                # Try simpler pattern without weekday
+                pattern = r'(\d+)\s+(\w+)\s+(\d+)\s*-\s*(\d+):(\d+)'
+                match = re.search(pattern, normalized)
+                if not match:
+                    return None
+                day, month_name, year, hour, minute = match.groups()
+            else:
+                weekday, day, month_name, year, hour, minute = match.groups()
+            
+            # Convert month name to number using utils
+            month = self._get_shamsi_month_number(month_name)
+            if month is None:
                 return None
             
-            href = link_element.get('href')
-            if not href:
-                return None
+            # Convert to integers
+            year_int = int(year)
+            day_int = int(day)
+            hour_int = int(hour)
+            minute_int = int(minute)
             
-            # Convert relative URL to absolute
-            full_url = self.base_url + href if href.startswith('/') else href
-            
-            # Extract title
-            title = self._clean_text(link_element.get_text())
-            
-            # Extract summary
-            summary_element = item_element.find('p')
-            summary = self._clean_text(summary_element.get_text()) if summary_element else ""
-            
-            # Extract published date from time element
-            time_element = item_element.find('time')
-            if not time_element:
-                return None
-            
-            # Get the date text from time element
-            date_text = self._clean_text(time_element.get_text())
-            
-            # Parse Shamsi date components
-            shamsi_components = self._parse_shamsi_date_from_text(date_text)
-            if not shamsi_components:
-                self.logger.debug(f"Could not parse Shamsi date from: {date_text}")
-                return None
-            
-            # Format Shamsi date string
-            shamsi_date_string = f"{shamsi_components['year']:04d}/{shamsi_components['month']:02d}/{shamsi_components['day']:02d}"
-            
-            # Try to convert to Gregorian for compatibility
-            gregorian_date = self._shamsi_to_gregorian_simple(
-                shamsi_components['year'],
-                shamsi_components['month'], 
-                shamsi_components['day']
-            )
-            
-            return {
-                'source': 'ISNA',
-                'link': full_url,
-                'title': title,
-                'summary': summary,
-                'date': gregorian_date,  # Gregorian date for compatibility
-                'shamsi_year': shamsi_components['year'],
-                'shamsi_month': shamsi_components['month'],
-                'shamsi_day': shamsi_components['day'],
-                'shamsi_date_string': shamsi_date_string,
-                'shamsi_month_name': shamsi_components.get('month_name', ''),
-                'published_datetime': None  # Will be extracted during content crawling
-            }
+            return (year_int, month, day_int, hour_int, minute_int)
             
         except Exception as e:
-            self.logger.debug(f"Error extracting single link data: {str(e)}")
+            self.logger.warning(f"Error parsing ISNA full date '{date_string}': {e}")
             return None
     
-    def _parse_shamsi_date_from_text(self, date_text):
+    def _get_shamsi_month_number(self, month_name):
         """
-        Parse Shamsi date from text like "۱۰ خرداد ۰۴ - ۲۱:۱۶"
-        
-        Returns:
-            Dict with year, month, day, month_name
+        Get Shamsi month number from month name using utils
         """
         try:
             from utils.shamsi_converter import ShamsiDateConverter
             converter = ShamsiDateConverter()
             
-            # Parse the date string
-            parsed = converter.parse_shamsi_date_string(date_text)
-            return parsed
+            # Check if month name matches any of the Shamsi months
+            for shamsi_month, month_num in converter.SHAMSI_MONTHS.items():
+                if month_name in shamsi_month or shamsi_month.startswith(month_name):
+                    return month_num
+            
+            return None
             
         except Exception as e:
-            self.logger.debug(f"Error parsing Shamsi date '{date_text}': {str(e)}")
+            self.logger.warning(f"Error getting month number for '{month_name}': {e}")
             return None
-    
-    def _check_date_boundary(self, page_links, target_date_str):
-        """
-        Check if we've reached the boundary (previous day's content)
-        
-        Args:
-            page_links: List of links from current page
-            target_date_str: Target date string "YYYY/MM/DD"
-        
-        Returns:
-            True if boundary reached, False otherwise
-        """
-        if not page_links:
-            return False
-        
-        # Check if any link has a date earlier than target date
-        target_parts = target_date_str.split('/')
-        target_year, target_month, target_day = int(target_parts[0]), int(target_parts[1]), int(target_parts[2])
-        
-        for link in page_links:
-            link_date_str = link.get('shamsi_date_string', '')
-            if not link_date_str:
-                continue
-            
-            try:
-                link_parts = link_date_str.split('/')
-                link_year, link_month, link_day = int(link_parts[0]), int(link_parts[1]), int(link_parts[2])
-                
-                # Compare dates
-                if (link_year < target_year or 
-                    (link_year == target_year and link_month < target_month) or
-                    (link_year == target_year and link_month == target_month and link_day < target_day)):
-                    
-                    self.logger.info(f"Found boundary: link date {link_date_str} is before target {target_date_str}")
-                    return True
-                    
-            except (ValueError, IndexError):
-                continue
-        
-        return False
     
     def _store_links_batch(self, links_data):
         """Store a batch of links in the database"""
