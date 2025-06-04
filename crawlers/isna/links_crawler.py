@@ -31,9 +31,6 @@ class ISNALinksCrawler:
         self._db_manager = db_manager
         self._driver = None
 
-        # Setup database
-        if not self._db_manager.connection:
-            self._db_manager.connect()
         self._db_manager.create_tables_if_not_exist()
 
     def crawl_archive_page(self, year: int, month: int, day: int, page_index: int = 1) -> list[NewsItem]:

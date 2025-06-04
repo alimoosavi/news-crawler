@@ -14,9 +14,11 @@ class DatabaseConfig(BaseSettings):
     db_name: str = Field(default="news_crawler", description="Database name")
     user: str = Field(default="postgres", description="Database user")
     password: str = Field(default="password", description="Database password")
+    min_conn: int = Field(default=5, description="Database min connection")
+    max_conn: int = Field(default=20, description="Database max connection")
 
     class Config:
-        env_prefix = "POSTGRES_"
+        env_prefix = "DATABASE_"
         case_sensitive = False
 
 
