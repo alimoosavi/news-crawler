@@ -276,9 +276,9 @@ Examples:
     # Show configuration info
     print("🗞️  ISNA News Crawler - Database Migration")
     print("=" * 50)
-    print(f"Database: {settings.database.database}")
-    print(f"Host: {settings.database.host}:{settings.database.port}")
-    print(f"User: {settings.database.user}")
+    print(f"Database: {settings.db_name.db_name}")
+    print(f"Host: {settings.db_name.host}:{settings.db_name.port}")
+    print(f"User: {settings.db_name.user}")
     print("=" * 50)
     
     # Run migration

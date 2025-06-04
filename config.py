@@ -6,27 +6,30 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 
+
 class DatabaseConfig(BaseSettings):
     """Database configuration settings"""
     host: str = Field(default="localhost", description="Database host")
     port: int = Field(default=5433, description="Database port")
-    database: str = Field(default="news_crawler", description="Database name")
+    db_name: str = Field(default="news_crawler", description="Database name")
     user: str = Field(default="postgres", description="Database user")
     password: str = Field(default="password", description="Database password")
-    
+
     class Config:
         env_prefix = "POSTGRES_"
         case_sensitive = False
+
 
 class SeleniumConfig(BaseSettings):
     """Selenium configuration settings"""
     hub_url: str = Field(default="http://localhost:4444/wd/hub", description="Selenium hub URL")
     display: str = Field(default=":99", description="Display setting")
     node_max_sessions: int = Field(default=10, description="Max sessions per node")
-    
+
     class Config:
         env_prefix = "SE_"
         case_sensitive = False
+
 
 class CrawlerConfig(BaseSettings):
     """Page crawler configuration settings"""
@@ -35,20 +38,21 @@ class CrawlerConfig(BaseSettings):
     sleep_interval: int = Field(default=30, description="Sleep interval between batches (seconds)")
     max_retries: int = Field(default=3, description="Maximum retry attempts for failed pages")
     retry_delay: int = Field(default=10, description="Delay between retries (seconds)")
-    
+
     class Config:
         env_prefix = "CRAWLER_"
         case_sensitive = False
-        
+
 
 class AppConfig(BaseSettings):
     """Application configuration settings"""
     log_level: str = Field(default="INFO", description="Logging level")
     debug: bool = Field(default=False, description="Debug mode")
-    
+
     class Config:
         env_prefix = "APP_"
         case_sensitive = False
+
 
 class Settings(BaseSettings):
     """Main settings class that combines all configurations"""
@@ -56,9 +60,10 @@ class Settings(BaseSettings):
     selenium: SeleniumConfig = SeleniumConfig()
     crawler: CrawlerConfig = CrawlerConfig()
     app: AppConfig = AppConfig()
-    
+
     class Config:
         case_sensitive = False
 
+
 # Create a global settings instance
-settings = Settings() 
+settings = Settings()
