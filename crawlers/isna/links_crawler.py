@@ -1,12 +1,15 @@
 import logging
-import time
 import re
-from urllib.parse import urlencode, urljoin
+from dataclasses import dataclass
+from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
-from dataclasses import dataclass
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 from database_manager import DatabaseManager
 
@@ -32,6 +35,63 @@ class ISNALinksCrawler:
         if not self._db_manager.connection:
             self._db_manager.connect()
         self._db_manager.create_tables_if_not_exist()
+
+    def crawl_archive_page(self, year: int, month: int, day: int, page_index: int = 1) -> list[NewsItem]:
+        """
+        Crawl archive page for specific date and page index
+
+        Args:
+            year: Year (e.g., 1404 for Persian calendar)
+            month: Month (1-12)
+            day: Day (1-31)
+            page_index: Page index (default: 1)
+
+        Returns:
+            List of NewsItem objects extracted from the page
+        """
+        # Construct the archive URL
+        params = {
+            'mn': month,
+            'wide': 0,
+            'dy': day,
+            'ms': 0,
+            'pi': page_index,
+            'yr': year
+        }
+
+        archive_url = f"{self.base_url}/page/archive.xhtml?{urlencode(params)}"
+        self.logger.info(f"Crawling archive page: {archive_url}")
+
+        try:
+            # Initialize driver if not already done
+            if not self._driver:
+                self._driver = self._create_driver()
+
+            # Navigate to the archive page
+            self._driver.get(archive_url)
+
+            # Wait for page to load - wait for the items container
+            wait = WebDriverWait(self._driver, 10)
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "items")))
+
+            # Get page source after it's loaded
+            html_content = self._driver.page_source
+
+            # Extract news items using the existing method
+            news_items = self.extract_news_items(html_content, self.base_url)
+
+            self.logger.info(f"Successfully extracted {len(news_items)} news items from archive page")
+            return news_items
+
+        except TimeoutException:
+            self.logger.error(f"Timeout waiting for page to load: {archive_url}")
+            return []
+        except WebDriverException as e:
+            self.logger.error(f"WebDriver error while crawling {archive_url}: {e}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error while crawling {archive_url}: {e}")
+            return []
 
     @classmethod
     def extract_news_items(cls, html_content: str, base_url: str = "https://www.isna.ir") -> list[NewsItem]:
@@ -113,4 +173,20 @@ class ISNALinksCrawler:
             options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
         return webdriver.Chrome(options=options)
+
+    def close_driver(self):
+        """Close the webdriver instance"""
+        if self._driver:
+            try:
+                self._driver.quit()
+                self._driver = None
+                self.logger.info("WebDriver closed successfully")
+            except Exception as e:
+                self.logger.error(f"Error closing WebDriver: {e}")
+
+    def __del__(self):
+        """Cleanup when object is destroyed"""
+        self.close_driver()
