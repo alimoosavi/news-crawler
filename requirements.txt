@@ -26,3 +26,5 @@ colorlog==6.8.0
 # New requirements for datetime handling
 pytz>=2023.3
 jdatetime>=4.1.0  # For accurate Shamsi date conversion
+
+sqlalchemy
