@@ -19,7 +19,6 @@ class NewsItem:
     """Typed data class for news items"""
     title: str
     link: str
-    summary: str
     published_datetime: str
 
 
@@ -123,13 +122,6 @@ class ISNALinksCrawler:
                 link = f"{base_url}{relative_link}" if relative_link and not relative_link.startswith(
                     'http') else relative_link
 
-                # Extract summary from <p> inside <div class="desc">
-                desc_div = li.find('div', class_='desc')
-                summary = ""
-                if desc_div:
-                    p_tag = desc_div.find('p')
-                    summary = p_tag.get_text(strip=True) if p_tag else ""
-
                 # Extract published_datetime from title attribute of <time> tag
                 time_tag = li.find('time')
                 published_datetime = ""
@@ -143,7 +135,6 @@ class ISNALinksCrawler:
                     news_item = NewsItem(
                         title=cls.clean_text(title),
                         link=link,
-                        summary=cls.clean_text(summary),
                         published_datetime=published_datetime
                     )
                     news_items.append(news_item)
