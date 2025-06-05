@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Example usage of ISNA Links Crawler with Shamsi date support
 """
 
 import logging
+from datetime import datetime
+import pytz
 from crawlers.isna.links_crawler import ISNALinksCrawler
 from database_manager import DatabaseManager
 from config import settings
@@ -17,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    """Example usage"""
+    """Crawl ISNA archive pages and persist news items to the database"""
 
-    # Initialize crawler
+    # Initialize DatabaseManager
     db_manager = DatabaseManager(
         host=settings.database.host,
         port=settings.database.port,
@@ -27,32 +29,20 @@ def main():
         user=settings.database.user,
         password=settings.database.password,
         min_conn=settings.database.min_conn,
-        max_conn=settings.database.max_conn)
-    crawler = ISNALinksCrawler(db_manager=db_manager)
+        max_conn=settings.database.max_conn
+    )
+    logger.info("DatabaseManager initialized successfully")
 
-    print(crawler.crawl_archive_page(year=1404, month=3, day=13, page_index=2))
-    # try:
-    #     # Crawl specific Shamsi date
-    #     logger.info("🚀 Starting ISNA link crawling for specific date")
-    #
-    #     # Crawl 10 Khordad 1404 (example date)
-    #     links_count = crawler.crawl_shamsi_date(
-    #         shamsi_year=1404,
-    #         shamsi_month=3,  # Khordad
-    #         shamsi_day=10
-    #     )
-    #
-    #     logger.info(f"✅ Found {links_count} links for 10 Khordad 1404")
-    #
-    #     # Show some statistics
-    #     db_stats = crawler._db_manager.get_processing_statistics()
-    #     logger.info(f"📊 Database stats: {db_stats}")
-    #
-    # except Exception as e:
-    #     logger.error(f"Error in crawler: {str(e)}")
-    #
-    # finally:
-    #     crawler.close()
+    # Initialize ISNALinksCrawler
+    crawler = ISNALinksCrawler(db_manager=db_manager, headless=True)
+    logger.info("ISNALinksCrawler initialized successfully")
+
+    # Define crawling parameters (e.g., specific Shamsi date and page)
+    shamsi_year = 1404
+    shamsi_month = 3  # Khordad
+    shamsi_day = 13
+
+    crawler.crawl_archive(year=shamsi_year, month=shamsi_month, day=shamsi_day)
 
 
 if __name__ == "__main__":

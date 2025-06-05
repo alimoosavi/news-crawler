@@ -7,6 +7,7 @@ from psycopg2.extras import execute_values
 
 logger = logging.getLogger(__name__)
 
+
 class DatabaseManager:
     """
     Database manager optimized for laptop resources with Persian date support
@@ -106,11 +107,10 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
             link TEXT UNIQUE NOT NULL,
-            date DATE,
             published_datetime TIMESTAMPTZ,
-            year INTEGER,
-            month INTEGER,
-            day INTEGER,
+            published_year INTEGER,
+            published_month INTEGER,
+            published_day INTEGER,
             date_string VARCHAR(20),
             has_processed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -118,8 +118,7 @@ class DatabaseManager:
         );
         CREATE INDEX idx_news_links_source ON news_links (source);
         CREATE INDEX idx_news_links_processed ON news_links (has_processed) WHERE has_processed = FALSE;
-        CREATE INDEX idx_news_links_date ON news_links (date DESC);
-        CREATE INDEX idx_news_links_persian ON news_links (year DESC, month DESC, day DESC);
+        CREATE INDEX idx_news_links_persian ON news_links (published_year DESC, published_month DESC, published_day DESC);
         CREATE INDEX idx_news_links_date_string ON news_links (date_string);
         """
 
@@ -144,9 +143,9 @@ class DatabaseManager:
             source VARCHAR(50) NOT NULL,
             published_date DATE,
             published_datetime TIMESTAMPTZ,
-            year INTEGER,
-            month INTEGER,
-            day INTEGER,
+            published_year INTEGER,
+            published_month INTEGER,
+            published_day INTEGER,
             date_string VARCHAR(20),
             month_name VARCHAR(20),
             title TEXT NOT NULL,
@@ -162,7 +161,7 @@ class DatabaseManager:
         CREATE INDEX idx_news_source ON news (source);
         CREATE INDEX idx_news_published_date ON news (published_date DESC);
         CREATE INDEX idx_news_published_datetime ON news (published_datetime DESC);
-        CREATE INDEX idx_news_persian ON news (year DESC, month DESC, day DESC);
+        CREATE INDEX idx_news_persian ON news (published_year DESC, published_month DESC, published_day DESC);
         CREATE INDEX idx_news_date_string ON news (date_string);
         CREATE INDEX idx_news_month_name ON news (month_name);
         CREATE INDEX idx_news_link_id ON news (link_id);
@@ -194,7 +193,7 @@ class DatabaseManager:
             self.logger.error(f"Error creating tables: {str(e)}")
             return False
 
-    def insert_news_link(self, source, link, date=None, published_datetime=None,
+    def insert_news_link(self, source, link, published_datetime=None,
                          year=None, month=None, day=None):
         """Insert a single news link with Persian date support"""
         date_string = None
@@ -202,15 +201,14 @@ class DatabaseManager:
             date_string = f"{year:04d}/{month:02d}/{day:02d}"
 
         insert_query = """
-        INSERT INTO news_links (source, link, date, published_datetime, 
-                               year, month, day, date_string)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO news_links (source, link, published_datetime, 
+                               published_year, published_month, published_day, date_string)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (link) DO UPDATE SET
-            date = EXCLUDED.date,
             published_datetime = EXCLUDED.published_datetime,
-            year = EXCLUDED.year,
-            month = EXCLUDED.month,
-            day = EXCLUDED.day,
+            published_year = EXCLUDED.published_year,
+            published_month = EXCLUDED.published_month,
+            published_day = EXCLUDED.published_day,
             date_string = EXCLUDED.date_string,
             updated_at = CURRENT_TIMESTAMP
         RETURNING id;
@@ -219,7 +217,7 @@ class DatabaseManager:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(insert_query, (
-                    source, link, date, published_datetime,
+                    source, link, published_datetime,
                     year, month, day, date_string
                 ))
                 link_id = cursor.fetchone()['id']
@@ -241,7 +239,7 @@ class DatabaseManager:
 
         insert_query = """
         INSERT INTO news (source, published_date, published_datetime, title, summary, content, 
-                         tags, link_id, has_processed, year, month, day,
+                         tags, link_id, has_processed, published_year, published_month, published_day,
                          date_string, month_name, author)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
@@ -349,15 +347,14 @@ class DatabaseManager:
 
         insert_query = """
         INSERT INTO news_links (
-            source, link, date, published_datetime,
-            year, month, day, date_string
+            source, link, published_datetime,
+            published_year, published_month, published_day, date_string
         ) VALUES %s
         ON CONFLICT (link) DO UPDATE SET
-            date = EXCLUDED.date,
             published_datetime = EXCLUDED.published_datetime,
-            year = EXCLUDED.year,
-            month = EXCLUDED.month,
-            day = EXCLUDED.day,
+            published_year = EXCLUDED.published_year,
+            published_month = EXCLUDED.published_month,
+            published_day = EXCLUDED.published_day,
             date_string = EXCLUDED.date_string,
             updated_at = CURRENT_TIMESTAMP;
         """
@@ -365,15 +362,17 @@ class DatabaseManager:
         try:
             values = []
             for item in links_data:
+                date_string = None
+                if item.published_year and item.published_month and item.published_day:
+                    date_string = f"{item.published_year:04d}/{item.published_month:02d}/{item.published_day:02d}"
                 values.append((
-                    item['source'],
-                    item['link'],
-                    item.get('date'),
-                    item.get('published_datetime'),
-                    item.get('year'),
-                    item.get('month'),
-                    item.get('day'),
-                    item.get('date_string')
+                    item.source,
+                    item.link,
+                    item.published_datetime,
+                    item.published_year,
+                    item.published_month,
+                    item.published_day,
+                    date_string
                 ))
 
             with self.get_cursor() as cursor:
