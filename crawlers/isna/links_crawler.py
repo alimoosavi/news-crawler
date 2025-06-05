@@ -46,11 +46,26 @@ class ISNALinksCrawler:
 
     def crawl_archive(self, year: int, month: int, day: int):
         page_index = 1
-        while page_index < 50:
+        target_date = jdatetime.date(year, month, day)
+        next_date = target_date + jdatetime.timedelta(days=1)
+
+        while True:
             self.logger.info(
                 f"Crawling ISNA archive for {year}/{month:02d}/{day:02d}, page {page_index}")
             news_items = self.crawl_archive_page(year, month, day, page_index)
-            self._db_manager.bulk_insert_news_links(news_items)
+            finish = any([
+                news_item.published_datetime < target_date
+                for news_item in news_items
+            ])
+            time_sliced_news_items = [
+                news_item
+                for news_item in news_items
+                if target_date <= news_item.published_datetime < next_date
+            ]
+            self._db_manager.bulk_insert_news_links(time_sliced_news_items)
+
+            if finish:
+                break
             page_index += 1
 
     def crawl_archive_page(self, year: int, month: int, day: int, page_index: int = 1) -> list[NewsItem]:

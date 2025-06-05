@@ -37,12 +37,8 @@ def main():
     crawler = ISNALinksCrawler(db_manager=db_manager, headless=True)
     logger.info("ISNALinksCrawler initialized successfully")
 
-    # Define crawling parameters (e.g., specific Shamsi date and page)
-    shamsi_year = 1404
-    shamsi_month = 3  # Khordad
-    shamsi_day = 13
-
-    crawler.crawl_archive(year=shamsi_year, month=shamsi_month, day=shamsi_day)
+    for day in range(1, 15):
+        crawler.crawl_archive(year=1404, month=3, day=day)
 
 
 if __name__ == "__main__":
