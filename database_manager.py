@@ -97,7 +97,7 @@ class DatabaseManager:
             return False
 
     def create_news_links_table(self):
-        """Create the news_links table with Persian date support"""
+        """Create the news_links table with Persian date support and type column"""
         if self.table_exists('news_links'):
             self.logger.info("news_links table already exists")
             return True
@@ -107,6 +107,7 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             source VARCHAR(50) NOT NULL,
             link TEXT UNIQUE NOT NULL,
+            type VARCHAR(50),
             published_datetime TIMESTAMPTZ,
             published_year INTEGER,
             published_month INTEGER,
@@ -117,6 +118,7 @@ class DatabaseManager:
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX idx_news_links_source ON news_links (source);
+        CREATE INDEX idx_news_links_type ON news_links (type);
         CREATE INDEX idx_news_links_processed ON news_links (has_processed) WHERE has_processed = FALSE;
         CREATE INDEX idx_news_links_persian ON news_links (published_year DESC, published_month DESC, published_day DESC);
         CREATE INDEX idx_news_links_date_string ON news_links (date_string);
@@ -125,7 +127,7 @@ class DatabaseManager:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(create_table_query)
-            self.logger.info("news_links table created successfully with Persian date support")
+            self.logger.info("news_links table created successfully with Persian date support and type column")
             return True
         except Exception as e:
             self.logger.error(f"Error creating news_links table: {str(e)}")
@@ -194,17 +196,18 @@ class DatabaseManager:
             return False
 
     def insert_news_link(self, source, link, published_datetime=None,
-                         year=None, month=None, day=None):
-        """Insert a single news link with Persian date support"""
+                         year=None, month=None, day=None, type=None):
+        """Insert a single news link with Persian date support and type"""
         date_string = None
         if year and month and day:
             date_string = f"{year:04d}/{month:02d}/{day:02d}"
 
         insert_query = """
-        INSERT INTO news_links (source, link, published_datetime, 
+        INSERT INTO news_links (source, link, type, published_datetime, 
                                published_year, published_month, published_day, date_string)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (link) DO UPDATE SET
+            type = EXCLUDED.type,
             published_datetime = EXCLUDED.published_datetime,
             published_year = EXCLUDED.published_year,
             published_month = EXCLUDED.published_month,
@@ -217,7 +220,7 @@ class DatabaseManager:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(insert_query, (
-                    source, link, published_datetime,
+                    source, link, type, published_datetime,
                     year, month, day, date_string
                 ))
                 link_id = cursor.fetchone()['id']
@@ -341,16 +344,17 @@ class DatabaseManager:
         return month_names.get(month_number, 'نامشخص')
 
     def bulk_insert_news_links(self, links_data):
-        """Bulk insert news links with Persian date support"""
+        """Bulk insert news links with Persian date support and type"""
         if not links_data:
             return
 
         insert_query = """
         INSERT INTO news_links (
-            source, link, published_datetime,
+            source, link, type, published_datetime,
             published_year, published_month, published_day, date_string
         ) VALUES %s
         ON CONFLICT (link) DO UPDATE SET
+            type = EXCLUDED.type,
             published_datetime = EXCLUDED.published_datetime,
             published_year = EXCLUDED.published_year,
             published_month = EXCLUDED.published_month,
@@ -368,6 +372,7 @@ class DatabaseManager:
                 values.append((
                     item.source,
                     item.link,
+                    item.type,
                     item.published_datetime,
                     item.published_year,
                     item.published_month,

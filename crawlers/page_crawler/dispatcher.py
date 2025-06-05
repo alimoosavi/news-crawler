@@ -1,11 +1,11 @@
+import logging
 import threading
 import time
-import logging
 from queue import Queue, Empty
 from typing import Dict, List, Optional, Set
-from datetime import datetime
-from database_manager import DatabaseManager
+
 from config import settings
+from database_manager import DatabaseManager
 from news_sources import NewsSourceInterface
 
 logger = logging.getLogger(__name__)
@@ -57,10 +57,6 @@ class NewsLinkDispatcher:
             return
 
         self.running = True
-
-        # Setup database
-        if not self.db_manager.connection:
-            self.db_manager.connect()
 
         # Start background threads
         self.fetcher_thread = threading.Thread(target=self._fetch_links_loop, daemon=True)
