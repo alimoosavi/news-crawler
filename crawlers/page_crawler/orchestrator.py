@@ -50,8 +50,6 @@ class PageCrawlerOrchestrator:
         self.running = True
 
         try:
-            # Setup database
-            self._setup_database()
 
             # Start dispatcher
             self._start_dispatcher()
@@ -87,17 +85,6 @@ class PageCrawlerOrchestrator:
         self._cleanup_database()
 
         logger.info(f"✅ {self.news_source.source_name} crawler stopped")
-
-    def _setup_database(self):
-        """Setup database connection"""
-        try:
-            if not self.db_manager.connection:
-                self.db_manager.connect()
-            self.db_manager.create_tables_if_not_exist()
-            logger.info("📊 Database setup completed")
-        except Exception as e:
-            logger.error(f"Database setup failed: {str(e)}")
-            raise
 
     def _start_dispatcher(self):
         """Start the dispatcher with news source injection"""
