@@ -4,11 +4,10 @@ Example usage of ISNA Links Crawler with Shamsi date support
 """
 
 import logging
-from datetime import datetime
-import pytz
+
+from config import settings
 from crawlers.isna.links_crawler import ISNALinksCrawler
 from database_manager import DatabaseManager
-from config import settings
 
 # Setup logging
 logging.basicConfig(

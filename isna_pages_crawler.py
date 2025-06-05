@@ -7,10 +7,12 @@ Distributed crawler that supports multiple news sources
 
 import logging
 import sys
-import argparse
-from crawlers.orchestrator import CrawlerOrchestrator
-from news_sources.factory import NewsSourceFactory, get_news_source
+import time
+
 from config import settings
+from crawlers.page_crawler.orchestrator import PageCrawlerOrchestrator
+from database_manager import DatabaseManager
+from news_sources.factory import get_news_source
 
 # Setup logging
 logging.basicConfig(
@@ -24,38 +26,29 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 def main():
     """Main entry point for news crawler"""
-    parser = argparse.ArgumentParser(description='Multi-Source News Crawler')
-    parser.add_argument(
-        '--source', 
-        type=str, 
-        default='ISNA',
-        choices=NewsSourceFactory.get_available_sources(),
-        help='News source to crawl'
+
+    # Initialize DatabaseManager
+    db_manager = DatabaseManager(
+        host=settings.database.host,
+        port=settings.database.port,
+        db_name=settings.database.db_name,
+        user=settings.database.user,
+        password=settings.database.password,
+        min_conn=settings.database.min_conn,
+        max_conn=settings.database.max_conn
     )
-    parser.add_argument(
-        '--list-sources',
-        action='store_true',
-        help='List available news sources'
-    )
-    
-    args = parser.parse_args()
-    
-    # List sources if requested
-    if args.list_sources:
-        print("Available news sources:")
-        for source in NewsSourceFactory.get_available_sources():
-            print(f"  - {source}")
-        return
-    
-    # Get the news source
+    logger.info("DatabaseManager initialized successfully")
+
+    source = "ISNA"
     try:
-        news_source = get_news_source(args.source)
+        news_source = get_news_source(source)
     except ValueError as e:
         logger.error(f"Error: {e}")
         return
-    
+
     logger.info(f"🗞️  News Crawler - {news_source.source_name} Edition")
     logger.info("=" * 50)
     logger.info(f"📋 Configuration:")
@@ -64,19 +57,18 @@ def main():
     logger.info(f"   Max Workers: {min(settings.crawler.max_workers, 4)}")
     logger.info(f"   Sleep Interval: {settings.crawler.sleep_interval}s")
     logger.info("=" * 50)
-    
+
     # Create and start orchestrator with injected news source
-    orchestrator = CrawlerOrchestrator(news_source)
-    
+    orchestrator = PageCrawlerOrchestrator(news_source=news_source, db_manager=db_manager)
+
     try:
         # Start the system
         orchestrator.start()
-        
+
         # Keep main thread alive
         while orchestrator.running:
-            import time
             time.sleep(1)
-            
+
     except KeyboardInterrupt:
         logger.info("🛑 Interrupted by user")
     except Exception as e:
@@ -84,5 +76,6 @@ def main():
     finally:
         orchestrator.stop()
 
+
 if __name__ == "__main__":
-    main() 
+    main()
