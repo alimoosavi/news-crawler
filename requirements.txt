@@ -10,21 +10,31 @@ selenium>=4.15.0
 psycopg2-binary>=2.9.0
 
 # Configuration management
-pydantic==2.5.0
-pydantic-settings==2.1.0
+pydantic==2.7.4
+pydantic-settings==2.4.0
 python-dotenv>=1.0.0
 
 # Utility libraries
 python-dateutil==2.8.2
+pytz>=2023.3
+jdatetime>=4.1.0
 
-# Optional: For better logging and debugging
+# Logging
 colorlog==6.8.0
 
-# Note: concurrent.futures is part of Python 3.2+ standard library
-# For production Shamsi date handling, consider: jdatetime>=4.1.0
+# Scheduler for periodic jobs
+apscheduler>=3.10.4
 
-# New requirements for datetime handling
-pytz>=2023.3
-jdatetime>=4.1.0  # For accurate Shamsi date conversion
+# ORM
+sqlalchemy>=2.0.0
 
-sqlalchemy
+# Optional: OpenAI SDK
+openai==1.68.2
+
+# Optional: if using LangChain
+langchain==0.3.23
+langchain-community==0.3.16
+
+# If you're using ChromaDB for vector storage
+chromadb==1.0.4
+fastapi==0.115.9

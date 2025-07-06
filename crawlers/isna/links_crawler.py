@@ -1,7 +1,8 @@
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime
+import jdatetime
+
 from urllib.parse import urlencode
 import pytz
 import jdatetime
@@ -14,21 +15,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from schema import NewsLinkData
 from database_manager import DatabaseManager
-
-
-@dataclass
-class NewsItem:
-    """Typed data class for news items"""
-    source: str
-    title: str
-    link: str
-    published_datetime: datetime
-    published_year: int
-    published_month: int
-    published_day: int
-    published_hour: int
-    published_minute: int
 
 
 class ISNALinksCrawler:
@@ -46,29 +34,45 @@ class ISNALinksCrawler:
 
     def crawl_archive(self, year: int, month: int, day: int):
         page_index = 1
-        target_date = jdatetime.date(year, month, day)
-        next_date = target_date + jdatetime.timedelta(days=1)
+        target_date_shamsi = jdatetime.date(year, month, day)
+        next_date_shamsi = target_date_shamsi + jdatetime.timedelta(days=1)
+
+        # Convert to Gregorian datetime for comparison
+        target_date_gregorian = target_date_shamsi.togregorian()
+        next_date_gregorian = next_date_shamsi.togregorian()
+
+        target_datetime = self.tehran_tz.localize(
+            datetime.combine(target_date_gregorian, datetime.min.time())
+        )
+        next_datetime = self.tehran_tz.localize(
+            datetime.combine(next_date_gregorian, datetime.min.time())
+        )
 
         while True:
             self.logger.info(
                 f"Crawling ISNA archive for {year}/{month:02d}/{day:02d}, page {page_index}")
             news_items = self.crawl_archive_page(year, month, day, page_index)
+
+            # Check if we've gone past the target date
             finish = any([
-                news_item.published_datetime < target_date
+                news_item.published_datetime < target_datetime
                 for news_item in news_items
             ])
+
+            # Filter news items to only include those within the target date
             time_sliced_news_items = [
                 news_item
                 for news_item in news_items
-                if target_date <= news_item.published_datetime < next_date
+                if target_datetime <= news_item.published_datetime < next_datetime
             ]
+
             self._db_manager.bulk_insert_news_links(time_sliced_news_items)
 
             if finish:
                 break
             page_index += 1
 
-    def crawl_archive_page(self, year: int, month: int, day: int, page_index: int = 1) -> list[NewsItem]:
+    def crawl_archive_page(self, year: int, month: int, day: int, page_index: int = 1) -> list[NewsLinkData]:
         """
         Crawl archive page for specific date and page index
 
@@ -77,9 +81,8 @@ class ISNALinksCrawler:
             month: Month (1-12)
             day: Day (1-31)
             page_index: Page index (default: 1)
-
         Returns:
-            List of NewsItem objects extracted from the page
+            List of NewsLinkData objects extracted from the page
         """
         params = {
             'mn': month,
@@ -115,6 +118,56 @@ class ISNALinksCrawler:
             self.logger.error(f"Unexpected error while crawling {archive_url}: {e}")
             return []
 
+    def crawl_recent_links(self, target_link: str, max_pages: int = 15):
+        """
+        Crawl recent ISNA archive pages starting from today and page through 
+        until the target_link is found or max_pages is reached.
+        Only insert links that are newer (i.e., appear before the target_link).
+        """
+        today = jdatetime.date.today()
+        page_index = 1
+        stop = False
+        last_link_item = None
+        
+        while not stop and page_index <= max_pages:
+            self.logger.info(f"Checking archive for {today}, page {page_index}")
+            news_items = self.crawl_archive_page(
+                today.year,
+                today.month,
+                today.day,
+                page_index
+            )
+
+            if not news_items:
+                self.logger.info(f"No news items found on page {page_index} for {today}")
+                break
+
+            # Find the index of target_link (if it exists)
+            target_index = next((i for i, item in enumerate(news_items) if item.link == target_link), None)
+
+            if target_index is not None:
+                # Only keep the newer items before the target link
+                fresh_items = news_items[:target_index]
+                stop = True
+                self.logger.info(f"Target link found on page {page_index}, inserting only fresh links")
+            else:
+                fresh_items = news_items
+
+            if fresh_items:
+                self._db_manager.bulk_insert_news_links(fresh_items)
+                if page_index == 1:
+                    last_link_item = fresh_items[0]
+                
+            if stop:
+                break
+
+            page_index += 1
+
+        if not stop:
+            self.logger.warning(f"Target link not found in {page_index - 1} pages for {today}")
+
+        return last_link_item.link
+    
     @classmethod
     def parse_persian_datetime(cls, persian_str):
         """Parse Persian datetime string into components"""
@@ -153,15 +206,15 @@ class ISNALinksCrawler:
         }
 
     @classmethod
-    def parse_persian_date(cls, date_string: str) -> tuple[datetime, int, int, int, int, int]:
+    def parse_persian_date(cls, date_string: str) -> datetime | None:
         """
-        Parse Persian date string (e.g., 'سه‌شنبه ۱۳ خرداد ۱۴۰۴ - ۲۰:۵۵') into components
+        Parse Persian date string (e.g., 'سه‌شنبه ۱۳ خرداد ۱۴۰۴ - ۲۰:۵۵') into datetime object
 
         Args:
             date_string: Persian date string
 
         Returns:
-            Tuple of (datetime_obj, year, month, day, hour, minute)
+            Timezone-aware datetime object or None if parsing fails
         """
         try:
             parsed = cls.parse_persian_datetime(date_string)
@@ -174,23 +227,15 @@ class ISNALinksCrawler:
                 gregorian_dt.hour,
                 gregorian_dt.minute
             )
-            dt = pytz.timezone('Asia/Tehran').localize(dt)
-
-            return (
-                dt,
-                parsed['shamsi_year'],
-                parsed['shamsi_month'],
-                parsed['shamsi_day'],
-                parsed['hour'],
-                parsed['minute']
-            )
+            # Return timezone-aware datetime
+            return pytz.timezone('Asia/Tehran').localize(dt)
 
         except Exception as e:
             logging.getLogger(__name__).error(f"Error parsing Persian date '{date_string}': {str(e)}")
-            return None, 0, 0, 0, 0, 0
+            return None
 
     @classmethod
-    def extract_news_items(cls, html_content: str, base_url: str = "https://www.isna.ir") -> list[NewsItem]:
+    def extract_news_items(cls, html_content: str, base_url: str = "https://www.isna.ir") -> list[NewsLinkData]:
         """
         Extract news items from HTML content containing div.items structure
 
@@ -199,7 +244,7 @@ class ISNALinksCrawler:
             base_url: Base URL to prepend to relative links
 
         Returns:
-            List of NewsItem dataclass instances
+            List of NewsLinkData dataclass instances
         """
         soup = BeautifulSoup(html_content, 'html.parser')
         news_items = []
@@ -223,33 +268,21 @@ class ISNALinksCrawler:
                         published_datetime_str = time_link.get('title', '').strip()
 
                 if title and link and published_datetime_str:
-                    dt, year, month, day, hour, minute = cls.parse_persian_date(published_datetime_str)
+                    dt = cls.parse_persian_date(published_datetime_str)
                     if dt is not None:
-                        news_item = NewsItem(
+                        news_item = NewsLinkData(
                             source=cls.SOURCE_NAME,
-                            title=cls.clean_text(title),
                             link=link,
-                            published_datetime=dt,
-                            published_year=year,
-                            published_month=month,
-                            published_day=day,
-                            published_hour=hour,
-                            published_minute=minute
+                            published_datetime=dt
                         )
                         news_items.append(news_item)
 
             except Exception as e:
                 logging.getLogger(__name__).error(f"Error processing news item: {e}")
                 continue
-
+        
+        news_items.sort(key=lambda item: item.published_datetime, reverse=True)
         return news_items
-
-    @classmethod
-    def clean_text(cls, text: str) -> str:
-        """Clean and normalize text content"""
-        if not text:
-            return ""
-        return re.sub(r'\s+', ' ', text).strip()
 
     def _create_driver(self):
         """Create Chrome driver"""

@@ -20,7 +20,8 @@ class NewsSourceFactory:
 
         if source_name not in cls._sources:
             available = ', '.join(cls._sources.keys())
-            raise ValueError(f"Unsupported news source '{source_name}'. Available: {available}")
+            raise ValueError(
+                f"Unsupported news source '{source_name}'. Available: {available}")
 
         return cls._sources[source_name]()
 

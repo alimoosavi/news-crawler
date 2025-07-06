@@ -24,9 +24,11 @@ class DatabaseConfig(BaseSettings):
 
 class SeleniumConfig(BaseSettings):
     """Selenium configuration settings"""
-    hub_url: str = Field(default="http://localhost:4444/wd/hub", description="Selenium hub URL")
+    hub_url: str = Field(default="http://localhost:4444/wd/hub",
+                         description="Selenium hub URL")
     display: str = Field(default=":99", description="Display setting")
-    node_max_sessions: int = Field(default=10, description="Max sessions per node")
+    node_max_sessions: int = Field(
+        default=10, description="Max sessions per node")
 
     class Config:
         env_prefix = "SE_"
@@ -35,11 +37,16 @@ class SeleniumConfig(BaseSettings):
 
 class CrawlerConfig(BaseSettings):
     """Page crawler configuration settings"""
-    bulk_size: int = Field(default=20, description="Number of pages to process in each batch")
-    max_workers: int = Field(default=5, description="Maximum concurrent workers")
-    sleep_interval: int = Field(default=30, description="Sleep interval between batches (seconds)")
-    max_retries: int = Field(default=3, description="Maximum retry attempts for failed pages")
-    retry_delay: int = Field(default=10, description="Delay between retries (seconds)")
+    bulk_size: int = Field(
+        default=20, description="Number of pages to process in each batch")
+    max_workers: int = Field(
+        default=5, description="Maximum concurrent workers")
+    sleep_interval: int = Field(
+        default=30, description="Sleep interval between batches (seconds)")
+    max_retries: int = Field(
+        default=3, description="Maximum retry attempts for failed pages")
+    retry_delay: int = Field(
+        default=10, description="Delay between retries (seconds)")
 
     class Config:
         env_prefix = "CRAWLER_"
