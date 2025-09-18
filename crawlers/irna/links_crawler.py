@@ -1,6 +1,5 @@
 import logging
-import re
-import time
+import time  # Import the time module
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -8,12 +7,13 @@ from urllib.parse import urlencode
 
 import jdatetime
 import pytz
-import requests
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.chrome.options import Options
 
 from broker_manager import BrokerManager
+from config import settings
 from schema import NewsLinkData
 
 
@@ -26,90 +26,38 @@ class IRNALinksCrawler:
         self.logger = logging.getLogger(__name__)
         self._broker_manager = broker_manager
         self.tehran_tz = pytz.timezone('Asia/Tehran')
-        self.session = self._create_session()
         self.save_html = save_html
         self.html_save_dir = Path(html_save_dir)
+
+        # Initialize Selenium WebDriver
+        self.driver = self._create_webdriver()
 
         # Create HTML save directory if saving is enabled
         if self.save_html:
             self.html_save_dir.mkdir(exist_ok=True)
             self.logger.info(f"HTML pages will be saved to: {self.html_save_dir.absolute()}")
 
-    def _create_session(self) -> requests.Session:
-        """Create a robust requests session with retry strategy and headers."""
-        session = requests.Session()
+    def _create_webdriver(self) -> webdriver.Remote:
+        """Create a Selenium Remote WebDriver connected to docker-compose service."""
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
 
-        # Retry strategy for resilience
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS"]
-        )
-
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10
-        )
-
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-
-        # Add realistic headers to avoid blocking
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        })
-
-        return session
-
-    def crawl_archive(self, year: int, month: int, day: int):
-        """Crawl paginated news links for a specific Shamsi date."""
-        page_index = 1
-        found_fresh_link = True
-        consecutive_empty_pages = 0
-        max_empty_pages = 3  # Stop after 3 consecutive empty pages
-
-        while found_fresh_link and consecutive_empty_pages < max_empty_pages:
-            self.logger.info(
-                f"Crawling IRNA archive for {year}/{month:02d}/{day:02d}, page {page_index}"
+        try:
+            driver = webdriver.Remote(
+                command_executor=settings.selenium.hub_url,
+                options=chrome_options
             )
-
-            news_items = self.crawl_archive_page(year, month, day, page_index)
-
-            if not news_items:
-                consecutive_empty_pages += 1
-                self.logger.info(
-                    f"No news items found on page {page_index} for {year}/{month:02d}/{day:02d} "
-                    f"(consecutive empty: {consecutive_empty_pages})"
-                )
-
-                if consecutive_empty_pages >= max_empty_pages:
-                    self.logger.info(f"Stopping after {max_empty_pages} consecutive empty pages")
-                    break
-
-                page_index += 1
-                continue
-
-            # Reset consecutive empty counter
-            consecutive_empty_pages = 0
-
-            # Batch produce to Kafka for better throughput
-            self._broker_manager.produce_links(news_items)
-            self.logger.info(f"Produced {len(news_items)} links to Kafka")
-
-            page_index += 1
-
-            # Add small delay to be respectful to the server
-            time.sleep(0.5)
+            driver.set_page_load_timeout(30)
+            self.logger.info("Connected to Selenium WebDriver successfully.")
+            return driver
+        except WebDriverException as e:
+            self.logger.error(f"Error initializing Selenium WebDriver: {e}")
+            raise
 
     def crawl_archive_page(self, year: int, month: int, day: int, page_index: int) -> List[NewsLinkData]:
-        """Crawl a specific paginated IRNA archive page with enhanced error handling."""
+        """Crawl a specific paginated IRNA archive page using Selenium WebDriver."""
         params = {
             "wide": 0,
             "ty": 1,
@@ -119,220 +67,134 @@ class IRNALinksCrawler:
             "dy": day,
             "pi": page_index
         }
-
         archive_url = f"{self.BASE_URL}{self.ARCHIVE_ENDPOINT}?{urlencode(params)}"
         self.logger.debug(f"Crawling archive page: {archive_url}")
 
         try:
-            response = self.session.get(
-                archive_url,
-                timeout=(10, 30),  # (connect_timeout, read_timeout)
-                allow_redirects=True
-            )
-            response.raise_for_status()
+            self.driver.get(archive_url)
 
-            # Check if we got valid content
-            if len(response.content) < 100:
-                self.logger.warning(f"Suspiciously small response from {archive_url}")
-                return []
+            # Pause the execution for 7 seconds to allow the page to load
+            self.logger.info("Waiting for 7 seconds for the page to load...")
+            time.sleep(7)
 
-            return self.extract_news_items(response.text)
+            html_content = self.driver.page_source
 
-        except requests.exceptions.Timeout as e:
-            self.logger.error(f"Timeout while crawling {archive_url}: {e}")
+            # print("\n\n", archive_url, "\n", "-" * 15, "\n", html_content, "\n", "-" * 15, "\n\n")
+
+            # Optional: save HTML for debugging
+            if self.save_html:
+                file_path = self.html_save_dir / f"archive_{year}_{month}_{day}_p{page_index}.html"
+                file_path.write_text(html_content, encoding="utf-8")
+
+            return self.extract_news_items(html_content)
+
+        except TimeoutException:
+            self.logger.error(f"Timeout while loading {archive_url}")
             return []
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                self.logger.warning(f"Rate limited on {archive_url}, waiting...")
-                time.sleep(5)  # Wait before retrying
-            else:
-                self.logger.error(f"HTTP error while crawling {archive_url}: {e}")
-            return []
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Request error while crawling {archive_url}: {e}")
+        except WebDriverException as e:
+            self.logger.error(f"Selenium WebDriver error while crawling {archive_url}: {e}")
             return []
         except Exception as e:
             self.logger.error(f"Unexpected error while processing {archive_url}: {e}")
             return []
 
-    @classmethod
-    def parse_persian_datetime(cls, persian_str: str) -> dict:
-        """Parse Persian datetime string with better error handling."""
-        persian_str = persian_str.replace("'", "").strip()
-        pattern = r'.*?:\s*(?P<weekday>\S+)\s+(?P<day>\d{1,2})\s+(?P<month>\S+)\s+(?P<year>\d{4})\s*-\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})'
-        match = re.search(pattern, persian_str)
-
-        if not match:
-            raise ValueError(f"Input string format is not valid for IRNA: {persian_str}")
-
-        parts = match.groupdict()
-        persian_months = {
-            'فروردین': 1, 'اردیبهشت': 2, 'خرداد': 3, 'تیر': 4,
-            'مرداد': 5, 'شهریور': 6, 'مهر': 7, 'آبان': 8,
-            'آذر': 9, 'دی': 10, 'بهمن': 11, 'اسفند': 12
-        }
-
-        shamsi_month = persian_months.get(parts['month'])
-        if shamsi_month is None:
-            raise ValueError(f"Invalid month name: {parts['month']}")
-
-        shamsi_year, shamsi_day = int(parts['year']), int(parts['day'])
-        hour, minute = int(parts['hour']), int(parts['minute'])
-
-        shamsi_datetime = jdatetime.datetime(shamsi_year, shamsi_month, shamsi_day, hour, minute)
-        return {
-            "datetime": shamsi_datetime,
-            "shamsi_year": shamsi_year,
-            "shamsi_month": shamsi_month,
-            "shamsi_day": shamsi_day,
-            "hour": hour,
-            "minute": minute
-        }
-
-    @classmethod
-    def parse_persian_date(cls, date_string: str) -> Optional[datetime]:
-        """Parse Persian date string to datetime with timezone."""
+    def parse_persian_datetime(self, persian_date_str: str, persian_time_str: str) -> Optional[datetime]:
+        """Convert Persian date & time strings into timezone-aware datetime (Tehran)."""
         try:
-            parsed = cls.parse_persian_datetime(date_string)
-            shamsi_dt = parsed['datetime']
-            gregorian_dt = shamsi_dt.togregorian()
-            dt = datetime(
-                gregorian_dt.year, gregorian_dt.month, gregorian_dt.day,
-                gregorian_dt.hour, gregorian_dt.minute
-            )
-            return pytz.timezone('Asia/Tehran').localize(dt)
+            date_obj = jdatetime.datetime.strptime(persian_date_str, "%Y/%m/%d")
+            time_obj = datetime.strptime(persian_time_str, "%H:%M")
+            combined = jdatetime.datetime(
+                date_obj.year,
+                date_obj.month,
+                date_obj.day,
+                time_obj.hour,
+                time_obj.minute
+            ).togregorian()
+            return self.tehran_tz.localize(combined)
         except Exception as e:
-            logging.getLogger(__name__).error(f"Error parsing IRNA Persian date '{date_string}': {str(e)}")
+            self.logger.error(f"Error parsing Persian datetime: {persian_date_str} {persian_time_str} -> {e}")
             return None
 
-    @classmethod
-    def extract_news_items(cls, html_content: str) -> List[NewsLinkData]:
-        """Extract news items from IRNA's archive HTML content with improved parsing."""
+    def parse_persian_date(self, persian_date_str: str) -> Optional[datetime]:
+        """Convert Persian date string into timezone-aware datetime (Tehran)."""
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+            date_obj = jdatetime.datetime.strptime(persian_date_str, "%Y/%m/%d")
+            return self.tehran_tz.localize(date_obj.togregorian())
         except Exception as e:
-            logging.getLogger(__name__).error(f"Error parsing HTML content: {e}")
-            return []
+            self.logger.error(f"Error parsing Persian date: {persian_date_str} -> {e}")
+            return None
 
-        items_divs = soup.find_all('div', class_='item-archive')
-        news_items: List[NewsLinkData] = []
+    def extract_news_items(self, html_content: str) -> List[NewsLinkData]:
+        """Extract news items from archive HTML page."""
+        soup = BeautifulSoup(html_content, "html.parser")
+        news_items = []
 
-        for div in items_divs:
+        for item in soup.select("div.item-archive"):
             try:
-                # More robust link extraction
-                h3_tag = div.find('h3')
-                if not h3_tag:
+                link_tag = item.select_one("a")
+                if not link_tag or "href" not in link_tag.attrs:
                     continue
 
-                link_tag = h3_tag.find('a')
-                if not link_tag:
-                    continue
+                news_url = link_tag["href"]
+                if not news_url.startswith("http"):
+                    news_url = f"{self.BASE_URL}{news_url}"
 
-                title = link_tag.get_text().strip()
-                if not title:
-                    continue
+                date_tag = item.select_one("span.ltr")
+                time_tag = item.select_one("span.item-time")
+                persian_date_str = date_tag.get_text(strip=True) if date_tag else None
+                persian_time_str = time_tag.get_text(strip=True) if time_tag else None
 
-                relative_link = link_tag.get('href', '')
-                if not relative_link:
-                    continue
+                if persian_date_str and persian_time_str:
+                    published_at = self.parse_persian_datetime(persian_date_str, persian_time_str)
+                elif persian_date_str:
+                    published_at = self.parse_persian_date(persian_date_str)
+                else:
+                    published_at = None
 
-                # Construct full URL
-                link = f"{cls.BASE_URL}{relative_link}" if relative_link and not relative_link.startswith(
-                    'http') else relative_link
-
-                # More robust date extraction
-                date_div = div.find('div', class_='item-date-line')
-                if not date_div:
-                    continue
-
-                time_tag = date_div.find('span', class_='date')
-                if not time_tag:
-                    continue
-
-                published_datetime_str = time_tag.get_text().strip()
-                if not published_datetime_str:
-                    continue
-
-                dt = cls.parse_persian_date(published_datetime_str)
-                if dt is not None:
-                    news_items.append(
-                        NewsLinkData(
-                            source=cls.SOURCE_NAME,
-                            link=link,
-                            published_datetime=dt
-                        )
-                    )
-
+                news_item = NewsLinkData(
+                    source=self.SOURCE_NAME,
+                    link=news_url,
+                    published_datetime=published_at
+                )
+                news_items.append(news_item)
             except Exception as e:
-                logging.getLogger(__name__).error(f"Error processing news item: {e}")
-                continue
+                self.logger.error(f"Error extracting news item: {e}")
 
-        # Sort by publication date (newest first)
-        news_items.sort(key=lambda item: item.published_datetime, reverse=True)
         return news_items
 
-    def crawl_recent_links(self, last_link: Optional[str] = None) -> Optional[str]:
-        """
-        Crawl recent news links for today only, iterating over page indexes.
-        Stops when reaching the given `last_link` or after max pages.
-        Returns the newest link found.
-        """
-        self.logger.info("Starting crawl_recent_links for today")
-        today = datetime.now(self.tehran_tz)
-        shamsi_date = jdatetime.datetime.fromgregorian(datetime=today)
-        max_pages = 30
-
-        newest_link: Optional[str] = None
+    def crawl_recent_links(self, last_seen_link: Optional[str] = None) -> Optional[str]:
+        """Crawl recent news links until reaching the last seen link."""
+        today = jdatetime.date.today()
+        page_index = 1
+        latest_link = None
         stop_crawling = False
-        total_items_processed = 0
-        consecutive_empty_pages = 0
-        max_empty_pages = 3
 
-        for page_index in range(1, max_pages + 1):
-            if stop_crawling:
+        while not stop_crawling:
+            news_items = self.crawl_archive_page(today.year, today.month, today.day, page_index)
+            print("\n\n", news_items, "\n\n")
+            if not news_items:
                 break
 
-            self.logger.debug(f"Crawling page {page_index} for {today.date()}")
-            news_items = self.crawl_archive_page(
-                shamsi_date.year, shamsi_date.month, shamsi_date.day, page_index
-            )
-
-            if not news_items:
-                consecutive_empty_pages += 1
-                if consecutive_empty_pages >= max_empty_pages:
-                    self.logger.info(f"No more content after {max_empty_pages} empty pages, stopping.")
-                    break
-                continue
-
-            consecutive_empty_pages = 0  # Reset counter
-            fresh_items = []
-
             for item in news_items:
-                if last_link and item.link == last_link:
-                    self.logger.info(f"Reached last_link: {last_link}")
+                if item.link == last_seen_link:
                     stop_crawling = True
                     break
-                fresh_items.append(item)
 
-            if fresh_items:
-                self._broker_manager.produce_links(fresh_items)
-                total_items_processed += len(fresh_items)
-                self.logger.info(f"Produced {len(fresh_items)} new links to Kafka")
+                # Send a batch of one item to the broker
+                self._broker_manager.produce_links([item])
 
-                # Track newest link (first item in sorted list)
-                if not newest_link:
-                    newest_link = fresh_items[0].link
+                if latest_link is None:
+                    latest_link = item.link
 
-            # Small delay between pages
-            time.sleep(0.5)
+            page_index += 1
 
-        self.logger.info(f"Crawl completed. Total items processed: {total_items_processed}")
-        return newest_link
+        return latest_link
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Cleanup session on exit."""
-        if hasattr(self, 'session'):
-            self.session.close()
+        """Cleanup WebDriver on exit."""
+        if hasattr(self, 'driver') and self.driver:
+            self.driver.quit()
+            self.logger.info("Selenium WebDriver closed.")
