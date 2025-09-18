@@ -61,7 +61,8 @@ def crawl_links_for_source(source: str, broker_manager: BrokerManager, cache_man
         fresh_last_link = crawler.crawl_recent_links(last_link)
 
         logger.info(f"[{source}] Link crawl finished")
-        cache_manager.update_last_link(source, fresh_last_link)
+        if fresh_last_link is not None:
+            cache_manager.update_last_link(source, fresh_last_link)
 
     except Exception as e:
         logger.exception(f"[{source}] Link crawl failed: {e}")
@@ -84,10 +85,8 @@ def schedule_news_links(broker_manager: BrokerManager):
 # Main
 # -------------------------------
 def main():
-    kafka_config = settings.kafka
-
     # Initialize broker manager and create topics if missing
-    with BrokerManager(kafka_config, logger) as broker_manager:
+    with BrokerManager(settings.redpanda, logger) as broker_manager:
         broker_manager.create_topics()  # ✅ ensure topics exist
 
         # Start scheduler

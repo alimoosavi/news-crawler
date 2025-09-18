@@ -7,23 +7,6 @@ load_dotenv()
 
 
 # ---------------------------
-# Database Config
-# ---------------------------
-class DatabaseConfig(BaseSettings):
-    host: str = Field(default="localhost")
-    port: int = Field(default=5433)
-    db_name: str = Field(default="news_crawler")
-    user: str = Field(default="postgres")
-    password: str = Field(default="password")
-    min_conn: int = Field(default=5)
-    max_conn: int = Field(default=20)
-
-    class Config:
-        env_prefix = "DATABASE_"
-        case_sensitive = False
-
-
-# ---------------------------
 # Selenium Config
 # ---------------------------
 class SeleniumConfig(BaseSettings):
@@ -66,38 +49,33 @@ class AppConfig(BaseSettings):
 
 
 # ---------------------------
-# Kafka Config
+# Redpanda Config (Kafka-compatible)
 # ---------------------------
-class KafkaConfig(BaseSettings):
-    advertised_listeners: str = Field(default="PLAINTEXT://localhost:9092")
-    broker_id: int = Field(default=1)
-    offsets_topic_replication_factor: int = Field(default=1)
-    transaction_state_log_min_isr: int = Field(default=1)
-    transaction_state_log_replication_factor: int = Field(default=1)
-    listeners_port: int = Field(default=9092)
-    jmx_port: int = Field(default=9101)
-    zookeeper_client_port: int = Field(default=2181)
+class RedpandaConfig(BaseSettings):
+    version: str = Field(default="v23.2.2")
+    smp: int = Field(default=1)
+    internal_port: int = Field(default=9092)
+    external_port: int = Field(default=19092)
+    admin_port: int = Field(default=9644)
 
     # Topics
     news_links_topic: str = Field(default="news_links")
-    news_content_topic: str = Field(default="news_content")
+    news_content_topic: str = Field(default="news_contents")
 
     class Config:
-        env_prefix = "KAFKA_"
+        env_prefix = "REDPANDA_"
         case_sensitive = False
 
 
 # ---------------------------
-# Kafka UI Config
+# Redpanda Console Config
 # ---------------------------
-class KafkaUIConfig(BaseSettings):
-    port: int = Field(default=8080)
-    cluster_name: str = Field(default="local")
-    bootstrap_servers: str = Field(default="localhost:9092")
-    zookeeper: str = Field(default="localhost:2181")
+class RedpandaConsoleConfig(BaseSettings):
+    version: str = Field(default="v2.3.0")
+    port: int = Field(default=18080)
 
     class Config:
-        env_prefix = "KAFKA_UI_"
+        env_prefix = "REDPANDA_CONSOLE_"
         case_sensitive = False
 
 
@@ -118,12 +96,11 @@ class RedisConfig(BaseSettings):
 # Main Settings
 # ---------------------------
 class Settings(BaseSettings):
-    database: DatabaseConfig = DatabaseConfig()
     selenium: SeleniumConfig = SeleniumConfig()
     crawler: CrawlerConfig = CrawlerConfig()
     app: AppConfig = AppConfig()
-    kafka: KafkaConfig = KafkaConfig()
-    kafka_ui: KafkaUIConfig = KafkaUIConfig()
+    redpanda: RedpandaConfig = RedpandaConfig()
+    redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
 
     class Config:

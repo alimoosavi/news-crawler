@@ -2,60 +2,50 @@ version: '3'
 services:
   chrome:
     image: selenium/standalone-chrome:4.15.0
+    container_name: webdriver
     ports:
       - "4444:4444"
-    shm_size: "1g"
+    shm_size: "512m"
     environment:
-      - SE_NODE_MAX_SESSIONS=4
-      - SE_NODE_SESSION_TIMEOUT=300
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1.0'
+      - SE_NODE_MAX_SESSIONS=${SE_NODE_MAX_SESSIONS}
+      - SE_NODE_SESSION_TIMEOUT=${SE_NODE_SESSION_TIMEOUT}
+    # resource hints (ignored in v3 but kept for readability)
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    container_name: zookeeper
-    hostname: zookeeper
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:${REDPANDA_VERSION}
+    container_name: broker
+    restart: always
+    command:
+      - redpanda start
+      - --smp ${REDPANDA_SMP}
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:${REDPANDA_INTERNAL_PORT},external://0.0.0.0:${REDPANDA_EXTERNAL_PORT}
+      - --advertise-kafka-addr internal://redpanda:${REDPANDA_INTERNAL_PORT},external://localhost:${REDPANDA_EXTERNAL_PORT}
     ports:
-      - "${ZOOKEEPER_CLIENT_PORT}:${ZOOKEEPER_CLIENT_PORT}"
+      - "${REDPANDA_EXTERNAL_PORT}:${REDPANDA_EXTERNAL_PORT}"
+      - "${REDPANDA_ADMIN_PORT}:${REDPANDA_ADMIN_PORT}"
+    volumes:
+      - ./data/redpanda:/var/lib/redpanda/data
+
+  redpanda_console:
+    image: docker.redpanda.com/redpandadata/console:${REDPANDA_CONSOLE_VERSION}
+    container_name: broker-console
+    restart: always
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml && /app/console'
     environment:
-      ZOOKEEPER_CLIENT_PORT: "${ZOOKEEPER_CLIENT_PORT}"
-      ZOOKEEPER_TICK_TIME: 2000
-
-  kafka:
-    image: confluentinc/cp-kafka:latest
-    container_name: kafka
-    hostname: kafka
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:${REDPANDA_INTERNAL_PORT}"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:${REDPANDA_ADMIN_PORT}"]
     ports:
-      - "${KAFKA_LISTENERS_PORT}:${KAFKA_LISTENERS_PORT}"
-      - "${KAFKA_JMX_PORT}:${KAFKA_JMX_PORT}"
+      - "${REDPANDA_CONSOLE_PORT}:8080"
     depends_on:
-      - zookeeper
-    environment:
-      KAFKA_BROKER_ID: "${KAFKA_BROKER_ID}"
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:${ZOOKEEPER_CLIENT_PORT}"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: "${KAFKA_ADVERTISED_LISTENERS}"
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR}"
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "${KAFKA_TRANSACTION_STATE_LOG_MIN_ISR}"
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "${KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR}"
-      KAFKA_JMX_PORT: "${KAFKA_JMX_PORT}"
-      KAFKA_JMX_HOSTNAME: localhost
-
-  kafka-ui:
-    image: ghcr.io/kafbat/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - "${KAFKA_UI_PORT}:${KAFKA_UI_PORT}"
-    depends_on:
-      - kafka
-      - zookeeper
-    environment:
-      KAFKA_CLUSTERS_0_NAME: "${KAFKA_UI_CLUSTER_NAME}"
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "${KAFKA_UI_BOOTSTRAP_SERVERS}"
-      KAFKA_CLUSTERS_0_ZOOKEEPER: "${KAFKA_UI_ZOOKEEPER}"
+      - redpanda
 
   redis:
     image: redis:7
@@ -63,7 +53,7 @@ services:
     ports:
       - "${REDIS_PORT}:${REDIS_PORT}"
     volumes:
-      - redis_data:/data   # ✅ stores data outside container
+      - redis_data:/data
     command: [ "redis-server", "--appendonly", "yes" ]
     environment:
       REDIS_HOST: ${REDIS_HOST}
@@ -77,5 +67,4 @@ services:
 
 
 volumes:
-  postgres_data:
   redis_data:
