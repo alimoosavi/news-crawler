@@ -38,3 +38,6 @@ langchain-community==0.3.16
 # If you're using ChromaDB for vector storage
 chromadb==1.0.4
 fastapi==0.115.9
+
+confluent-kafka>=2.5.3
+redis

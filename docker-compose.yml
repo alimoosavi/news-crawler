@@ -4,7 +4,7 @@ services:
     image: selenium/standalone-chrome:4.15.0
     ports:
       - "4444:4444"
-    shm_size: "1g"  # Reduced memory for laptop
+    shm_size: "1g"
     environment:
       - SE_NODE_MAX_SESSIONS=4
       - SE_NODE_SESSION_TIMEOUT=300
@@ -14,21 +14,68 @@ services:
           memory: 1G
           cpus: '1.0'
 
-  postgres:
-    image: postgres:15
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    hostname: zookeeper
     ports:
-      - "5433:5432"
+      - "${ZOOKEEPER_CLIENT_PORT}:${ZOOKEEPER_CLIENT_PORT}"
     environment:
-      POSTGRES_DB: news_store
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      ZOOKEEPER_CLIENT_PORT: "${ZOOKEEPER_CLIENT_PORT}"
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "${KAFKA_LISTENERS_PORT}:${KAFKA_LISTENERS_PORT}"
+      - "${KAFKA_JMX_PORT}:${KAFKA_JMX_PORT}"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: "${KAFKA_BROKER_ID}"
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:${ZOOKEEPER_CLIENT_PORT}"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: "${KAFKA_ADVERTISED_LISTENERS}"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR}"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "${KAFKA_TRANSACTION_STATE_LOG_MIN_ISR}"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "${KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR}"
+      KAFKA_JMX_PORT: "${KAFKA_JMX_PORT}"
+      KAFKA_JMX_HOSTNAME: localhost
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "${KAFKA_UI_PORT}:${KAFKA_UI_PORT}"
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "${KAFKA_UI_CLUSTER_NAME}"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "${KAFKA_UI_BOOTSTRAP_SERVERS}"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "${KAFKA_UI_ZOOKEEPER}"
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "${REDIS_PORT}:${REDIS_PORT}"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
+      - redis_data:/data   # ✅ stores data outside container
+    command: [ "redis-server", "--appendonly", "yes" ]
+    environment:
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_DB: ${REDIS_DB}
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 
 volumes:
   postgres_data:
+  redis_data:

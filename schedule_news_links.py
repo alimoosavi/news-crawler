@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scheduler for crawling news links
+Scheduler for crawling news links with Kafka
 """
 
 import logging
@@ -9,19 +9,23 @@ from concurrent.futures import ThreadPoolExecutor
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# Import cache manager
+from broker_manager import BrokerManager
 from cache_manager import CacheManager
-# Import your settings and crawlers
 from config import settings
 from crawlers.irna.links_crawler import IRNALinksCrawler
-from database_manager import DatabaseManager
 
+# -------------------------------
+# Logging
+# -------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("LinksScheduler")
 
+# -------------------------------
+# News sources and crawlers
+# -------------------------------
 NEWS_SOURCES = ["IRNA"]
 
 LINK_CRAWLERS = {
@@ -29,53 +33,73 @@ LINK_CRAWLERS = {
 }
 
 
-def get_db_manager() -> DatabaseManager:
-    return DatabaseManager(
-        host=settings.database.host,
-        port=settings.database.port,
-        db_name=settings.database.db_name,
-        user=settings.database.user,
-        password=settings.database.password,
-        min_conn=settings.database.min_conn,
-        max_conn=settings.database.max_conn
-    )
-
-
+# -------------------------------
+# Cache Manager
+# -------------------------------
 def get_cache_manager() -> CacheManager:
-    cache_manager = CacheManager()
-    cache_manager.load_cache()
+    cache_manager = CacheManager(
+        host=settings.redis.host,
+        port=settings.redis.port,
+        db=settings.redis.db
+    )
     return cache_manager
 
 
-def crawl_links_for_source(source: str, db_manager: DatabaseManager, cache_manager: CacheManager):
+# -------------------------------
+# Crawl links for a single source
+# -------------------------------
+def crawl_links_for_source(source: str, broker_manager: BrokerManager, cache_manager: CacheManager):
+    """
+    Run the link crawler for a single source, pushing results to Kafka.
+    """
     try:
         logger.info(f"[{source}] Starting link crawl")
         last_link = cache_manager.get_last_link(source)
-        crawler = LINK_CRAWLERS[source](db_manager=db_manager, headless=True)
+
+        # Inject broker manager into crawler
+        crawler = LINK_CRAWLERS[source](broker_manager)
         fresh_last_link = crawler.crawl_recent_links(last_link)
+
         logger.info(f"[{source}] Link crawl finished")
         cache_manager.update_last_link(source, fresh_last_link)
+
     except Exception as e:
         logger.exception(f"[{source}] Link crawl failed: {e}")
 
 
-def schedule_news_links():
-    db_manager = get_db_manager()
+# -------------------------------
+# Schedule crawling
+# -------------------------------
+def schedule_news_links(broker_manager: BrokerManager):
+    """
+    Schedule crawling for all configured news sources using a thread pool.
+    """
     cache_manager = get_cache_manager()
     with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as executor:
         for source in NEWS_SOURCES:
-            executor.submit(crawl_links_for_source, source,
-                            db_manager, cache_manager)
+            executor.submit(crawl_links_for_source, source, broker_manager, cache_manager)
 
 
+# -------------------------------
+# Main
+# -------------------------------
 def main():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(schedule_news_links, 'interval', seconds=15)
-    scheduler.start()
-    logger.info("Scheduler started for news links")
-    while True:
+    kafka_config = settings.kafka
+
+    # Initialize broker manager and create topics if missing
+    with BrokerManager(kafka_config, logger) as broker_manager:
+        broker_manager.create_topics()  # ✅ ensure topics exist
+
+        # Start scheduler
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(schedule_news_links, 'interval', seconds=15, args=[broker_manager])
+        scheduler.start()
+        logger.info("Scheduler started for news links")
+
+        # Keep main thread alive
         try:
-            time.sleep(1)
+            while True:
+                time.sleep(1)
         except (KeyboardInterrupt, SystemExit):
             scheduler.shutdown()
             logger.info("Scheduler shut down gracefully")
