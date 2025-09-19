@@ -79,8 +79,6 @@ class IRNALinksCrawler:
 
             html_content = self.driver.page_source
 
-            # print("\n\n", archive_url, "\n", "-" * 15, "\n", html_content, "\n", "-" * 15, "\n\n")
-
             # Optional: save HTML for debugging
             if self.save_html:
                 file_path = self.html_save_dir / f"archive_{year}_{month}_{day}_p{page_index}.html"
@@ -129,28 +127,33 @@ class IRNALinksCrawler:
         soup = BeautifulSoup(html_content, "html.parser")
         news_items = []
 
-        for item in soup.select("div.item-archive"):
+        # Select all news items with class 'news'
+        for item in soup.select("li.news"):
             try:
-                link_tag = item.select_one("a")
+                # Extract the link from the <a> tag in the <h3> element
+                link_tag = item.select_one("div.desc h3 a")
                 if not link_tag or "href" not in link_tag.attrs:
+                    self.logger.warning("No valid link found in news item")
                     continue
 
                 news_url = link_tag["href"]
                 if not news_url.startswith("http"):
                     news_url = f"{self.BASE_URL}{news_url}"
 
-                date_tag = item.select_one("span.ltr")
-                time_tag = item.select_one("span.item-time")
-                persian_date_str = date_tag.get_text(strip=True) if date_tag else None
-                persian_time_str = time_tag.get_text(strip=True) if time_tag else None
+                # Extract the publication date and time from the <time> tag
+                time_tag = item.select_one("time a")
+                persian_datetime_str = time_tag.get_text(strip=True) if time_tag else None
 
-                if persian_date_str and persian_time_str:
-                    published_at = self.parse_persian_datetime(persian_date_str, persian_time_str)
-                elif persian_date_str:
-                    published_at = self.parse_persian_date(persian_date_str)
-                else:
-                    published_at = None
+                published_at = None
+                if persian_datetime_str:
+                    try:
+                        # Parse Persian datetime (format: YYYY-MM-DD HH:MM)
+                        date_time_obj = jdatetime.datetime.strptime(persian_datetime_str, "%Y-%m-%d %H:%M")
+                        published_at = self.tehran_tz.localize(date_time_obj.togregorian())
+                    except Exception as e:
+                        self.logger.error(f"Error parsing Persian datetime: {persian_datetime_str} -> {e}")
 
+                # Create NewsLinkData object
                 news_item = NewsLinkData(
                     source=self.SOURCE_NAME,
                     link=news_url,
@@ -160,6 +163,7 @@ class IRNALinksCrawler:
             except Exception as e:
                 self.logger.error(f"Error extracting news item: {e}")
 
+        self.logger.info(f"Extracted {len(news_items)} news items from the page")
         return news_items
 
     def crawl_recent_links(self, last_seen_link: Optional[str] = None) -> Optional[str]:
@@ -171,7 +175,6 @@ class IRNALinksCrawler:
 
         while not stop_crawling:
             news_items = self.crawl_archive_page(today.year, today.month, today.day, page_index)
-            print("\n\n", news_items, "\n\n")
             if not news_items:
                 break
 
