@@ -77,6 +77,10 @@ class IRNAPageCrawler:
                 paragraphs = body_tag.find_all("p")
                 content = "\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
 
+            # Extract summary
+            summary_tag = soup.select_one("p.summary.introtext[itemprop='description']")
+            summary = summary_tag.get_text(strip=True) if summary_tag else None
+
             # Extract all images from figure.item-img and inside body
             images = []
             main_img_tag = soup.select_one("figure.item-img img")
@@ -96,6 +100,8 @@ class IRNAPageCrawler:
                 content=content,
                 published_datetime=link_data.published_datetime,
                 images=images or None,
+                summary=summary,
+                link=link_data.link,
             )
         except Exception as e:
             self.logger.error(f"Error parsing HTML for {link_data.link}: {e}", exc_info=True)
@@ -129,10 +135,10 @@ class IRNAPageCrawler:
 
         try:
             for batch in self._broker_manager.consume_batch(
-                topic,
-                NewsLinkData,
-                batch_size=self.batch_size,
-                group_id=group_id
+                    topic,
+                    NewsLinkData,
+                    batch_size=self.batch_size,
+                    group_id=group_id
             ):
                 if not batch:
                     time.sleep(1)

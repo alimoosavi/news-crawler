@@ -91,7 +91,7 @@ services:
 #      - "${ELASTIC_PORT_TRANSPORT}:9300"
 #    volumes:
 #      - es_data:/usr/share/elasticsearch/data
-
+#
 #  kibana:
 #    image: docker.elastic.co/kibana/kibana:8.11.3
 #    container_name: kibana

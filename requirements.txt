@@ -29,7 +29,7 @@ apscheduler>=3.10.4
 sqlalchemy>=2.0.0
 
 # Optional: OpenAI SDK
-openai==1.68.2
+openai==0.28.0
 
 # Optional: if using LangChain
 langchain==0.3.23
@@ -44,3 +44,5 @@ redis
 pyspark>=3.5.0
 yake>=0.4.8
 pandas>=2.2.0
+
+tiktoken

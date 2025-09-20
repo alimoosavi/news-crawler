@@ -93,6 +93,17 @@ class RedisConfig(BaseSettings):
 
 
 # ---------------------------
+# OpenAI Config
+# ---------------------------
+class OpenAIConfig(BaseSettings):
+    api_key: str = Field(default="")
+
+    class Config:
+        env_prefix = "OPENAI_"
+        case_sensitive = False
+
+
+# ---------------------------
 # Main Settings
 # ---------------------------
 class Settings(BaseSettings):
@@ -102,6 +113,7 @@ class Settings(BaseSettings):
     redpanda: RedpandaConfig = RedpandaConfig()
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
+    openai: OpenAIConfig = OpenAIConfig()
 
     class Config:
         case_sensitive = False
