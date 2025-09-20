@@ -90,41 +90,31 @@ class IRNALinksCrawler:
             self.logger.error(f"Unexpected error while processing {archive_url}: {e}", exc_info=True)
             return []
 
-    def parse_persian_datetime(self, persian_date_str: str, persian_time_str: str) -> Optional[datetime]:
-        """Convert Persian date & time strings into timezone-aware datetime (Tehran)."""
-        self.logger.debug(f"Parsing Persian datetime: {persian_date_str} {persian_time_str}")
-        try:
-            date_obj = jdatetime.datetime.strptime(persian_date_str, "%Y/%m/%d")
-            time_obj = datetime.strptime(persian_time_str, "%H:%M")
-            combined = jdatetime.datetime(
-                date_obj.year,
-                date_obj.month,
-                date_obj.day,
-                time_obj.hour,
-                time_obj.minute
-            ).togregorian()
-            localized_datetime = self.tehran_tz.localize(combined)
-            self.logger.debug(f"Successfully parsed datetime: {localized_datetime}")
-            return localized_datetime
-        except Exception as e:
-            self.logger.error(f"Failed to parse Persian datetime: {persian_date_str} {persian_time_str}: {e}",
-                              exc_info=True)
-            return None
+    @staticmethod
+    def parse_shamsi_to_utc(persian_datetime_str: str) -> "datetime.datetime":
+        """
+        Convert a Shamsi (Jalali) datetime string with Persian digits
+        to a timezone-aware UTC datetime object.
 
-    def parse_persian_date(self, persian_date_str: str) -> Optional[datetime]:
-        """Convert Persian date string into timezone-aware datetime (Tehran)."""
-        self.logger.debug(f"Parsing Persian date: {persian_date_str}")
-        try:
-            date_obj = jdatetime.datetime.strptime(persian_date_str, "%Y/%m/%d")
-            localized_date = self.tehran_tz.localize(date_obj.togregorian())
-            self.logger.debug(f"Successfully parsed date: {localized_date}")
-            return localized_date
-        except Exception as e:
-            self.logger.error(f"Failed to parse Persian date: {persian_date_str}: {e}", exc_info=True)
-            return None
+        Example input: "۱۴۰۴-۰۶-۲۹ ۱۱:۲۲"
+        """
+        # Convert Persian digits to English digits
+        persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+        english_digits = "0123456789"
+        translation_table = str.maketrans(persian_digits, english_digits)
+        english_datetime_str = persian_datetime_str.translate(translation_table)
+
+        # Parse Jalali datetime
+        jalali_dt = jdatetime.datetime.strptime(english_datetime_str, "%Y-%m-%d %H:%M")
+
+        # Convert to Gregorian datetime
+        gregorian_dt = jalali_dt.togregorian()
+
+        # Return as UTC-aware datetime
+        return gregorian_dt.replace(tzinfo=pytz.UTC)
 
     def extract_news_items(self, html_content: str) -> List[NewsLinkData]:
-        """Extract news items from archive HTML page."""
+        """Extract news items from archive HTML page, storing published_datetime as a string."""
         self.logger.debug("Starting extraction of news items from HTML")
         soup = BeautifulSoup(html_content, "html.parser")
         news_items = []
@@ -147,28 +137,19 @@ class IRNALinksCrawler:
                     news_url = f"{self.BASE_URL}{news_url}"
                 self.logger.debug(f"Extracted news URL: {news_url}")
 
-                # Extract the publication date and time from the <time> tag
+                # Extract the publication date and time as a string from the <time> tag
                 time_tag = item.select_one("time a")
                 persian_datetime_str = time_tag.get_text(strip=True) if time_tag else None
-                self.logger.debug(f"Extracted Persian datetime: {persian_datetime_str}")
+                if not persian_datetime_str:
+                    self.logger.warning(f"No publication datetime found in news item {index}")
+                else:
+                    self.logger.debug(f"Extracted Persian datetime string: {persian_datetime_str}")
 
-                published_at = None
-                if persian_datetime_str:
-                    try:
-                        # Parse Persian datetime (format: YYYY-MM-DD HH:MM)
-                        date_time_obj = jdatetime.datetime.strptime(persian_datetime_str, "%Y-%m-%d %H:%M")
-                        published_at = self.tehran_tz.localize(date_time_obj.togregorian())
-                        self.logger.debug(f"Parsed published datetime: {published_at}")
-                    except Exception as e:
-                        self.logger.error(
-                            f"Failed to parse Persian datetime {persian_datetime_str} for item {index}: {e}",
-                            exc_info=True)
-
-                # Create NewsLinkData object
+                # Create NewsLinkData object with the raw datetime string
                 news_item = NewsLinkData(
                     source=self.SOURCE_NAME,
                     link=news_url,
-                    published_datetime=published_at
+                    published_datetime=self.parse_shamsi_to_utc(persian_datetime_str)
                 )
                 news_items.append(news_item)
                 self.logger.debug(f"Added news item: {news_item.link}, published at {news_item.published_datetime}")
