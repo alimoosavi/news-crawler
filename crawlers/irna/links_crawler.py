@@ -1,7 +1,6 @@
 import logging
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, List
 from urllib.parse import urlencode
 
@@ -22,23 +21,14 @@ class IRNALinksCrawler:
     BASE_URL = "https://www.irna.ir"
     ARCHIVE_ENDPOINT = "/archive"
 
-    def __init__(self, broker_manager: BrokerManager, save_html: bool = False, html_save_dir: str = "html_pages"):
+    def __init__(self, broker_manager: BrokerManager):
         self.logger = logging.getLogger(__name__)
         self._broker_manager = broker_manager
         self.tehran_tz = pytz.timezone('Asia/Tehran')
-        self.save_html = save_html
-        self.html_save_dir = Path(html_save_dir)
-
-        # Log initialization parameters
-        self.logger.info(f"Initializing IRNALinksCrawler with save_html={save_html}, html_save_dir={html_save_dir}")
 
         # Initialize Selenium WebDriver
         self.driver = self._create_webdriver()
-
-        # Create HTML save directory if saving is enabled
-        if self.save_html:
-            self.html_save_dir.mkdir(exist_ok=True)
-            self.logger.info(f"Created HTML save directory: {self.html_save_dir.absolute()}")
+        self.logger.info("IRNALinksCrawler initialized.")
 
     def _create_webdriver(self) -> webdriver.Remote:
         """Create a Selenium Remote WebDriver connected to docker-compose service."""
@@ -85,13 +75,6 @@ class IRNALinksCrawler:
             html_content = self.driver.page_source
             self.logger.debug(f"Retrieved HTML content (length: {len(html_content)} characters)")
 
-            # Optional: save HTML for debugging
-            if self.save_html:
-                file_path = self.html_save_dir / f"archive_{year}_{month}_{day}_p{page_index}.html"
-                self.logger.info(f"Saving HTML to {file_path}")
-                file_path.write_text(html_content, encoding="utf-8")
-                self.logger.debug(f"HTML saved successfully to {file_path}")
-
             self.logger.debug("Extracting news items from HTML content")
             news_items = self.extract_news_items(html_content)
             self.logger.info(f"Crawled {len(news_items)} news items from {archive_url}")
@@ -124,7 +107,8 @@ class IRNALinksCrawler:
             self.logger.debug(f"Successfully parsed datetime: {localized_datetime}")
             return localized_datetime
         except Exception as e:
-            self.logger.error(f"Failed to parse Persian datetime: {persian_date_str} {persian_time_str}: {e}", exc_info=True)
+            self.logger.error(f"Failed to parse Persian datetime: {persian_date_str} {persian_time_str}: {e}",
+                              exc_info=True)
             return None
 
     def parse_persian_date(self, persian_date_str: str) -> Optional[datetime]:
@@ -176,7 +160,9 @@ class IRNALinksCrawler:
                         published_at = self.tehran_tz.localize(date_time_obj.togregorian())
                         self.logger.debug(f"Parsed published datetime: {published_at}")
                     except Exception as e:
-                        self.logger.error(f"Failed to parse Persian datetime {persian_datetime_str} for item {index}: {e}", exc_info=True)
+                        self.logger.error(
+                            f"Failed to parse Persian datetime {persian_datetime_str} for item {index}: {e}",
+                            exc_info=True)
 
                 # Create NewsLinkData object
                 news_item = NewsLinkData(
@@ -193,15 +179,19 @@ class IRNALinksCrawler:
         self.logger.info(f"Successfully extracted {len(news_items)} news items")
         return news_items
 
-    def crawl_recent_links(self, last_seen_link: Optional[str] = None) -> Optional[str]:
-        """Crawl recent news links until reaching the last seen link."""
+    def crawl_recent_links(self, last_seen_link: Optional[str] = None, max_pages: int = 5) -> Optional[str]:
+        """Crawl recent news links up to a maximum number of pages or until last_seen_link is reached."""
         today = jdatetime.date.today()
-        self.logger.info(f"Starting crawl of recent links for {today.year}-{today.month}-{today.day}, last_seen_link={last_seen_link}")
+        self.logger.info(
+            f"Starting crawl of recent links for {today.year}-{today.month}-{today.day}, "
+            f"last_seen_link={last_seen_link}, max_pages={max_pages}"
+        )
+
         page_index = 1
         latest_link = None
         stop_crawling = False
 
-        while not stop_crawling:
+        while not stop_crawling and page_index <= max_pages:
             self.logger.debug(f"Crawling page {page_index}")
             news_items = self.crawl_archive_page(today.year, today.month, today.day, page_index)
             self.logger.info(f"Retrieved {len(news_items)} items from page {page_index}")
@@ -210,19 +200,24 @@ class IRNALinksCrawler:
                 self.logger.info("No more news items found, stopping crawl")
                 break
 
+            batch_to_send: List[NewsLinkData] = []
+
             for item in news_items:
                 if item.link == last_seen_link:
                     self.logger.info(f"Reached last seen link: {last_seen_link}, stopping crawl")
                     stop_crawling = True
                     break
 
-                # Send a batch of one item to the broker
-                self.logger.debug(f"Sending news item to broker: {item.link}")
-                self._broker_manager.produce_links([item])
+                batch_to_send.append(item)
 
+                # Set latest_link from the first unseen item
                 if latest_link is None:
                     latest_link = item.link
                     self.logger.debug(f"Set latest link: {latest_link}")
+
+            if batch_to_send:
+                self.logger.info(f"Sending batch of {len(batch_to_send)} news items to broker")
+                self._broker_manager.produce_links(batch_to_send)
 
             page_index += 1
 

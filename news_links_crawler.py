@@ -40,7 +40,6 @@ def get_cache_manager() -> CacheManager:
     cache_manager = CacheManager(
         host=settings.redis.host,
         port=settings.redis.port,
-        db=settings.redis.db
     )
     return cache_manager
 

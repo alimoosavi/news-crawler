@@ -53,44 +53,57 @@ services:
       - "${REDIS_PORT}:${REDIS_PORT}"
     volumes:
       - redis_data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+    command: [ "redis-server", "--appendonly", "yes" ]
     environment:
       REDIS_HOST: ${REDIS_HOST}
       REDIS_PORT: ${REDIS_PORT}
       REDIS_DB: ${REDIS_DB}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  elasticsearch:
-    image: elasticsearch:8.11.3
-    container_name: elasticsearch
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - "ES_JAVA_OPTS=${ELASTIC_JAVA_OPTS}"
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-    mem_limit: ${ELASTIC_MEMORY_LIMIT}
+  redisinsight:
+    image: redislabs/redisinsight:latest
+    container_name: redisinsight
     ports:
-      - "${ELASTIC_PORT}:9200"
-      - "${ELASTIC_PORT_TRANSPORT}:9300"
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-
-  kibana:
-    image: kibana:8.11.3
-    container_name: kibana
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:${ELASTIC_PORT}
-    ports:
-      - "${KIBANA_PORT}:5601"
+      - "${REDISINSIGHT_PORT}:5540"   # fix: map to 5540, not 8001
     depends_on:
-      - elasticsearch
-    mem_limit: ${KIBANA_MEMORY_LIMIT}
+      - redis
+    environment:
+      - RI_HOST=0.0.0.0
+    volumes:
+      - redisinsight_data:/db
+
+#  elasticsearch:
+#    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+#    container_name: elasticsearch
+#    environment:
+#      - discovery.type=single-node
+#      - xpack.security.enabled=false
+#      - xpack.security.http.ssl.enabled=false
+#      - "ES_JAVA_OPTS=${ELASTIC_JAVA_OPTS}"
+#      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+#    mem_limit: ${ELASTIC_MEMORY_LIMIT}
+#    ports:
+#      - "${ELASTIC_PORT}:9200"
+#      - "${ELASTIC_PORT_TRANSPORT}:9300"
+#    volumes:
+#      - es_data:/usr/share/elasticsearch/data
+
+#  kibana:
+#    image: docker.elastic.co/kibana/kibana:8.11.3
+#    container_name: kibana
+#    environment:
+#      - ELASTICSEARCH_HOSTS=http://elasticsearch:${ELASTIC_PORT}
+#    ports:
+#      - "${KIBANA_PORT}:5601"
+#    depends_on:
+#      - elasticsearch
+#    mem_limit: ${KIBANA_MEMORY_LIMIT}
 
 volumes:
   redis_data:
   es_data:
+  redisinsight_data:

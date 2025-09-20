@@ -18,3 +18,4 @@ class NewsData:
     title: str
     content: str
     published_datetime: datetime
+    images: Optional[list[str]]
