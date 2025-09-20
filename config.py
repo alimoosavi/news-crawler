@@ -104,6 +104,44 @@ class OpenAIConfig(BaseSettings):
 
 
 # ---------------------------
+# Elasticsearch & Kibana Config
+# ---------------------------
+class ElasticsearchConfig(BaseSettings):
+    port: int = Field(default=9200)
+    port_transport: int = Field(default=9300)
+    memory_limit: str = Field(default="1g")
+    java_opts: str = Field(default="-Xms512m -Xmx512m")
+    password: str = Field(default="your_strong_password")
+
+    class Config:
+        env_prefix = "ELASTIC_"
+        case_sensitive = False
+
+
+class KibanaConfig(BaseSettings):
+    port: int = Field(default=5601)
+    memory_limit: str = Field(default="512m")
+
+    class Config:
+        env_prefix = "KIBANA_"
+        case_sensitive = False
+
+
+# ---------------------------
+# Spark Settings
+# ---------------------------
+class SparkConfig(BaseSettings):
+    version: str = Field(default="3.2.1")
+    master_url: str = Field(default="spark://spark-master:7077")
+    worker_cores: int = Field(default=1)
+    worker_memory: str = Field(default="1G")
+
+    class Config:
+        env_prefix = "SPARK_"
+        case_sensitive = False
+
+
+# ---------------------------
 # Main Settings
 # ---------------------------
 class Settings(BaseSettings):
@@ -114,6 +152,9 @@ class Settings(BaseSettings):
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
     openai: OpenAIConfig = OpenAIConfig()
+    elasticsearch: ElasticsearchConfig = ElasticsearchConfig()
+    kibana: KibanaConfig = KibanaConfig()
+    spark: SparkConfig = SparkConfig()
 
     class Config:
         case_sensitive = False

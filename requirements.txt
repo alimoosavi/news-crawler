@@ -46,3 +46,4 @@ yake>=0.4.8
 pandas>=2.2.0
 
 tiktoken
+hazm

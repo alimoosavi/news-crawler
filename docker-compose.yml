@@ -76,32 +76,56 @@ services:
     volumes:
       - redisinsight_data:/db
 
-#  elasticsearch:
-#    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
-#    container_name: elasticsearch
-#    environment:
-#      - discovery.type=single-node
-#      - xpack.security.enabled=false
-#      - xpack.security.http.ssl.enabled=false
-#      - "ES_JAVA_OPTS=${ELASTIC_JAVA_OPTS}"
-#      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-#    mem_limit: ${ELASTIC_MEMORY_LIMIT}
-#    ports:
-#      - "${ELASTIC_PORT}:9200"
-#      - "${ELASTIC_PORT_TRANSPORT}:9300"
-#    volumes:
-#      - es_data:/usr/share/elasticsearch/data
-#
-#  kibana:
-#    image: docker.elastic.co/kibana/kibana:8.11.3
-#    container_name: kibana
-#    environment:
-#      - ELASTICSEARCH_HOSTS=http://elasticsearch:${ELASTIC_PORT}
-#    ports:
-#      - "${KIBANA_PORT}:5601"
-#    depends_on:
-#      - elasticsearch
-#    mem_limit: ${KIBANA_MEMORY_LIMIT}
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=${ELASTIC_JAVA_OPTS}"
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+    mem_limit: ${ELASTIC_MEMORY_LIMIT}
+    ports:
+      - "${ELASTIC_PORT}:9200"
+      - "${ELASTIC_PORT_TRANSPORT}:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.3
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:${ELASTIC_PORT}
+    ports:
+      - "${KIBANA_PORT}:5601"
+    depends_on:
+      - elasticsearch
+    mem_limit: ${KIBANA_MEMORY_LIMIT}
+
+  spark-master:
+    image: bitnami/spark:3.2.1
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    command: ["/opt/bitnami/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+
+  spark-worker:
+    image: bitnami/spark:3.2.1
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+      - redpanda
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 1G
+    volumes:
+      - ./news_nlp_processor.py:/app/news_nlp_processor.py
+      - ./requirements_nlp.txt:/app/requirements_nlp.txt
+    command: ["/opt/bitnami/spark/bin/spark-submit", "--jars", "/opt/bitnami/spark/jars/spark-sql-kafka-0-10_2.12-3.2.1.jar", "/app/news_nlp_processor.py"]
 
 volumes:
   redis_data:
