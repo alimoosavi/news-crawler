@@ -7,8 +7,10 @@ services:
       - "${SE_PORT}:${SE_PORT}"
     shm_size: "512m"
     environment:
-      - SE_NODE_MAX_SESSIONS=${SE_NODE_MAX_SESSIONS}
-      - SE_NODE_SESSION_TIMEOUT=${SE_NODE_SESSION_TIMEOUT}
+      - SE_NODE_MAX_SESSIONS
+      - SE_NODE_SESSION_TIMEOUT
+    networks:
+      - monitoring
 
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:${REDPANDA_VERSION}
@@ -25,6 +27,8 @@ services:
       - "${REDPANDA_ADMIN_PORT}:${REDPANDA_ADMIN_PORT}"
     volumes:
       - ./data/redpanda:/var/lib/redpanda/data
+    networks:
+      - monitoring
 
   redpanda_console:
     image: docker.redpanda.com/redpandadata/console:${REDPANDA_CONSOLE_VERSION}
@@ -45,6 +49,8 @@ services:
       - "${REDPANDA_CONSOLE_PORT}:8080"
     depends_on:
       - redpanda
+    networks:
+      - monitoring
 
   redis:
     image: redis:7
@@ -55,79 +61,142 @@ services:
       - redis_data:/data
     command: [ "redis-server", "--appendonly", "yes" ]
     environment:
-      REDIS_HOST: ${REDIS_HOST}
-      REDIS_PORT: ${REDIS_PORT}
-      REDIS_DB: ${REDIS_DB}
+      - REDIS_HOST
+      - REDIS_PORT
+      - REDIS_DB
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - monitoring
 
   redisinsight:
     image: redislabs/redisinsight:latest
     container_name: redisinsight
     ports:
-      - "${REDISINSIGHT_PORT}:5540"   # fix: map to 5540, not 8001
+      - "${REDISINSIGHT_PORT}:5540"
     depends_on:
       - redis
     environment:
-      - RI_HOST=0.0.0.0
+      - RI_HOST
     volumes:
       - redisinsight_data:/db
+    networks:
+      - monitoring
 
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
-    container_name: elasticsearch
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - "ES_JAVA_OPTS=${ELASTIC_JAVA_OPTS}"
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-    mem_limit: ${ELASTIC_MEMORY_LIMIT}
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
     ports:
-      - "${ELASTIC_PORT}:9200"
-      - "${ELASTIC_PORT_TRANSPORT}:9300"
+      - "${QDRANT_PORT}:6333"
+      - "${QDRANT_GRPC_PORT}:6334"
     volumes:
-      - es_data:/usr/share/elasticsearch/data
-
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.11.3
-    container_name: kibana
+      - qdrant_data:/qdrant/storage
     environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:${ELASTIC_PORT}
-    ports:
-      - "${KIBANA_PORT}:5601"
-    depends_on:
-      - elasticsearch
-    mem_limit: ${KIBANA_MEMORY_LIMIT}
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:6333/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - monitoring
 
-  spark-master:
-    image: bitnami/spark:3.2.1
-    container_name: spark-master
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
     ports:
-      - "8080:8080"
-      - "7077:7077"
-    command: ["/opt/bitnami/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+      - "${PROMETHEUS_PORT}:${PROMETHEUS_PORT}"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - monitoring
 
-  spark-worker:
-    image: bitnami/spark:3.2.1
-    container_name: spark-worker
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "${GRAFANA_PORT}:${GRAFANA_PORT}"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring
+    environment:
+      - GF_SECURITY_ADMIN_USER
+      - GF_SECURITY_ADMIN_PASSWORD
     depends_on:
-      - spark-master
+      - prometheus
+
+  # ---------------------------------------------
+  # Your Python Services for Development
+  # ---------------------------------------------
+
+  news-links-crawler:
+    image: base_crawler_image:latest
+    container_name: news-links-crawler
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: python news_links_crawler.py
+    ports:
+      - "${NEWS_LINKS_CRAWLER_PORT}:${NEWS_LINKS_CRAWLER_PORT}"
+    networks:
+      - monitoring
+    depends_on:
       - redpanda
-    environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
-      SPARK_WORKER_CORES: 1
-      SPARK_WORKER_MEMORY: 1G
+      - redis
+
+  news-content-crawler:
+    image: base_crawler_image:latest
+    container_name: news-content-crawler
     volumes:
-      - ./news_nlp_processor.py:/app/news_nlp_processor.py
-      - ./requirements_nlp.txt:/app/requirements_nlp.txt
-    command: ["/opt/bitnami/spark/bin/spark-submit", "--jars", "/opt/bitnami/spark/jars/spark-sql-kafka-0-10_2.12-3.2.1.jar", "/app/news_nlp_processor.py"]
+      - .:/app
+    working_dir: /app
+    command: python news_content_crawler.py
+    ports:
+      - "${NEWS_CONTENT_CRAWLER_PORT}:${NEWS_CONTENT_CRAWLER_PORT}"
+    networks:
+      - monitoring
+    depends_on:
+      - redpanda
+      - chrome
+
+  news-processor:
+    image: base_crawler_image:latest
+    container_name: news-processor
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: python news_processor.py
+    ports:
+      - "${NEWS_PROCESSOR_PORT}:${NEWS_PROCESSOR_PORT}"
+    networks:
+      - monitoring
+    depends_on:
+      - redpanda
+      - qdrant
 
 volumes:
   redis_data:
-  es_data:
   redisinsight_data:
+  qdrant_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  monitoring:
+    driver: bridge

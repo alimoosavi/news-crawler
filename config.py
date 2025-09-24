@@ -93,6 +93,19 @@ class RedisConfig(BaseSettings):
 
 
 # ---------------------------
+# Qdrant Vector DB Config
+# ---------------------------
+class QdrantConfig(BaseSettings):
+    port: int = Field(default=6333)
+    grpc_port: int = Field(default=6334)
+    log_level: str = Field(default="INFO")
+
+    class Config:
+        env_prefix = "QDRANT_"
+        case_sensitive = False
+
+
+# ---------------------------
 # OpenAI Config
 # ---------------------------
 class OpenAIConfig(BaseSettings):
@@ -100,30 +113,6 @@ class OpenAIConfig(BaseSettings):
 
     class Config:
         env_prefix = "OPENAI_"
-        case_sensitive = False
-
-
-# ---------------------------
-# Elasticsearch & Kibana Config
-# ---------------------------
-class ElasticsearchConfig(BaseSettings):
-    port: int = Field(default=9200)
-    port_transport: int = Field(default=9300)
-    memory_limit: str = Field(default="1g")
-    java_opts: str = Field(default="-Xms512m -Xmx512m")
-    password: str = Field(default="your_strong_password")
-
-    class Config:
-        env_prefix = "ELASTIC_"
-        case_sensitive = False
-
-
-class KibanaConfig(BaseSettings):
-    port: int = Field(default=5601)
-    memory_limit: str = Field(default="512m")
-
-    class Config:
-        env_prefix = "KIBANA_"
         case_sensitive = False
 
 
@@ -142,6 +131,41 @@ class SparkConfig(BaseSettings):
 
 
 # ---------------------------
+# Hugging Face Config
+# ---------------------------
+class HuggingFaceConfig(BaseSettings):
+    access_key: str = Field(default="")
+
+    class Config:
+        env_prefix = "HUGGING_FACE_"
+        case_sensitive = False
+
+
+# ---------------------------
+# Prometheus Config
+# ---------------------------
+class PrometheusConfig(BaseSettings):
+    port: int = Field(default=9090)
+
+    class Config:
+        env_prefix = "PROMETHEUS_"
+        case_sensitive = False
+
+
+# ---------------------------
+# Grafana Config
+# ---------------------------
+class GrafanaConfig(BaseSettings):
+    port: int = Field(default=3000)
+    admin_user: str = Field(default="admin")
+    admin_password: str = Field(default="admin-password")
+
+    class Config:
+        env_prefix = "GF_SECURITY_"
+        case_sensitive = False
+
+
+# ---------------------------
 # Main Settings
 # ---------------------------
 class Settings(BaseSettings):
@@ -151,10 +175,12 @@ class Settings(BaseSettings):
     redpanda: RedpandaConfig = RedpandaConfig()
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
+    qdrant: QdrantConfig = QdrantConfig()
     openai: OpenAIConfig = OpenAIConfig()
-    elasticsearch: ElasticsearchConfig = ElasticsearchConfig()
-    kibana: KibanaConfig = KibanaConfig()
     spark: SparkConfig = SparkConfig()
+    huggingface: HuggingFaceConfig = HuggingFaceConfig()
+    prom: PrometheusConfig = PrometheusConfig()
+    grafana: GrafanaConfig = GrafanaConfig()
 
     class Config:
         case_sensitive = False

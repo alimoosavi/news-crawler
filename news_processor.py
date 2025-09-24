@@ -1,266 +1,142 @@
 #!/usr/bin/env python3
 """
-PySpark Structured Streaming job for NLP processing of news content.
+News Processor
+Consumes news content from Redpanda, generates semantic embeddings,
+and persists enriched data to a vector database.
 """
-import json
 import logging
-import os
-from typing import List, Dict
+import time
+from typing import List
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, udf
-from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    TimestampType,
-    ArrayType,
-    MapType,
-)
+from prometheus_client import Gauge, Counter, Summary, Info, start_http_server
 
+# Assuming these modules are available in your environment
+from broker_manager import BrokerManager
 from config import settings
+from schema import NewsData
 
+# --------------------
 # Logging setup
+# --------------------
 logging.basicConfig(
     level=settings.app.log_level,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("NewsNLPProcessor")
+logger = logging.getLogger("NewsProcessor")
 
-# Import Hazm components for Persian NLP
-try:
-    import hazm
+# --------------------
+# Prometheus Metrics
+# --------------------
+# General info about the service
+SERVICE_INFO = Info(
+    'news_processor_info',
+    'General information about the news processor service'
+)
 
-    # Initialize hazm components without download method
-    normalizer = hazm.Normalizer()
+# Gauges
+PROCESSING_BATCH_SIZE = Gauge(
+    'processor_processing_batch_size',
+    'Number of news articles in the current batch being processed'
+)
 
-    # Try to initialize POS tagger with default model path
-    try:
-        # Method 1: Try with default model (if installed via pip)
-        tagger = hazm.POSTagger()
-    except Exception as e:
-        logger.warning(f"Could not load default POS tagger: {e}")
-        try:
-            # Method 2: Try with explicit model path if you have it
-            model_path = os.path.expanduser("~/hazm_models/postagger.model")
-            if os.path.exists(model_path):
-                tagger = hazm.POSTagger(model=model_path)
-            else:
-                tagger = None
-                logger.warning("POS tagger model not found, POS tagging will be disabled")
-        except Exception as e2:
-            logger.warning(f"Could not load POS tagger from path: {e2}")
-            tagger = None
+# Counters
+CONTENT_CONSUMED_TOTAL = Counter(
+    'processor_content_consumed_total',
+    'Total number of news articles consumed from the Kafka topic'
+)
+ARTICLES_PERSISTED_TOTAL = Counter(
+    'processor_articles_persisted_total',
+    'Total number of news articles successfully persisted to the vector database'
+)
+PROCESSOR_ERRORS_TOTAL = Counter(
+    'processor_errors_total',
+    'Total number of errors encountered during news processing',
+    ['error_type']
+)
 
-    # Initialize other components
-    sent_tokenize = hazm.SentenceTokenizer()
-    word_tokenize = hazm.WordTokenizer()
-
-    # Try to initialize NER tagger
-    try:
-        # Method 1: Try with default model
-        ner_tagger = hazm.NamedEntityRecognizer()
-    except Exception as e:
-        logger.warning(f"Could not load default NER tagger: {e}")
-        try:
-            # Method 2: Try with explicit model path if you have it
-            ner_model_path = os.path.expanduser("~/hazm_models/ner.model")
-            if os.path.exists(ner_model_path):
-                ner_tagger = hazm.NamedEntityRecognizer(model=ner_model_path)
-            else:
-                ner_tagger = None
-                logger.warning("NER model not found, NER will be disabled")
-        except Exception as e2:
-            logger.warning(f"Could not load NER tagger from path: {e2}")
-            ner_tagger = None
-
-except ImportError:
-    logger.error(
-        "Hazm library not found. Please install it with: pip install hazm"
-    )
-    normalizer = None
-    tagger = None
-    sent_tokenize = None
-    word_tokenize = None
-    ner_tagger = None
+# Summaries
+EMBEDDING_DURATION_SECONDS = Summary(
+    'processor_embedding_duration_seconds',
+    'Time taken to generate a semantic embedding for a news summary'
+)
+VECTOR_DB_UPSERT_DURATION_SECONDS = Summary(
+    'processor_vector_db_upsert_duration_seconds',
+    'Time taken to upsert a news article and its embedding to the vector database'
+)
+BATCH_PROCESSING_DURATION_SECONDS = Summary(
+    'processor_batch_processing_duration_seconds',
+    'Time taken to process a full batch of news articles'
+)
 
 
-def get_spark_session(app_name: str) -> SparkSession:
-    """
-    Creates and returns a SparkSession.
-    """
-    logger.info(f"Creating SparkSession with app name '{app_name}'...")
-    return (
-        SparkSession.builder.appName(app_name)
-        .master(settings.spark.master_url)
-        .getOrCreate()
-    )
-
-
-def extract_entities(text: str) -> List[Dict[str, str]]:
-    """
-    Extracts named entities from Persian text using the hazm library.
-    This function processes text and returns a list of dictionaries,
-    each containing a found entity and its label.
-    """
-    if not normalizer or not word_tokenize:
-        return []
-
-    try:
-        # Normalize the text to handle character variations and half-spaces
-        normalized_text = normalizer.normalize(text)
-
-        # Tokenize the text into words
-        words = word_tokenize.tokenize(normalized_text)
-
-        # If NER tagger is available, use it
-        if ner_tagger:
-            try:
-                tagged_words = ner_tagger.tag(words)
-                found_entities = []
-
-                # Convert hazm's format to the desired output format
-                for word, tag in tagged_words:
-                    if tag and tag not in ["O"]:  # O typically means "Outside" (no entity)
-                        found_entities.append({"text": word, "label": tag})
-
-                return found_entities
-            except Exception as e:
-                logger.warning(f"NER tagging failed: {e}")
-
-        # Fallback: Simple entity extraction using POS tags if available
-        if tagger:
-            try:
-                pos_tagged = tagger.tag(words)
-                found_entities = []
-
-                for word, pos_tag in pos_tagged:
-                    # Persian POS tags for potential entities
-                    if pos_tag in ["N", "Ne"]:  # Noun, Proper noun
-                        found_entities.append({"text": word, "label": "NOUN"})
-
-                return found_entities
-            except Exception as e:
-                logger.warning(f"POS tagging failed: {e}")
-
-        # Ultimate fallback: return empty list
-        return []
-
-    except Exception as e:
-        logger.error(f"Entity extraction failed: {e}")
-        return []
-
-
-def extract_keywords(text: str) -> List[str]:
-    """
-    A simple keyword extraction function.
-    In a real-world scenario, this would use a more advanced method (e.g., TF-IDF).
-    """
-    if not normalizer or not word_tokenize:
-        # Fallback to simple split
-        common_words = {"the", "a", "an", "is", "of", "in", "for", "and", "to", "را", "به", "از", "در", "که"}
-        return [
-            word.lower()
-            for word in text.split()
-            if len(word) > 3 and word.lower() not in common_words
-        ]
-
-    try:
-        # Use hazm for better tokenization
-        normalized_text = normalizer.normalize(text)
-        words = word_tokenize.tokenize(normalized_text)
-
-        # Persian and English stop words
-        common_words = {
-            "the", "a", "an", "is", "of", "in", "for", "and", "to",
-            "را", "به", "از", "در", "که", "این", "آن", "با", "بر", "تا"
-        }
-
-        return [
-            word.lower()
-            for word in words
-            if len(word) > 3 and word.lower() not in common_words
-        ]
-    except Exception as e:
-        logger.warning(f"Keyword extraction failed, using fallback: {e}")
-        common_words = {"the", "a", "an", "is", "of", "in", "for", "and", "to"}
-        return [
-            word.lower()
-            for word in text.split()
-            if len(word) > 3 and word.lower() not in common_words
-        ]
-
-
+# --------------------
+# Main Loop
+# --------------------
 def main():
     """
-    Main function to run the Structured Streaming job.
+    Main function to consume, process, and persist enriched news data.
     """
-    spark = get_spark_session("NewsNLPProcessor")
-    spark.sparkContext.setLogLevel(settings.app.log_level.upper())
+    try:
+        start_http_server(settings.prom.port)
+        logger.info(f"Prometheus metrics server started on port {settings.prom.port}")
+    except OSError as e:
+        logger.warning(f"Failed to start Prometheus server, port {settings.prom.port} might be in use: {e}")
 
-    # Register UDFs
-    ner_udf = udf(
-        extract_entities, ArrayType(MapType(StringType(), StringType()))
-    )
-    keywords_udf = udf(extract_keywords, ArrayType(StringType()))
+    # Set service info
+    SERVICE_INFO.info({
+        'version': '1.0.0',
+        'pipeline_stage': 'news_processor'
+    })
 
-    # Define the schema of the incoming Kafka message
-    schema = StructType(
-        [
-            StructField("url", StringType()),
-            StructField("title", StringType()),
-            StructField("summary", StringType()),
-            StructField("published_at", TimestampType()),
-            StructField("created_at", TimestampType()),
-            StructField("content", StringType()),
-            StructField("category", StringType()),
-            StructField("source", StringType()),
-        ]
-    )
+    with BrokerManager(settings.redpanda, logger) as broker:
+        broker.create_topics()
 
-    logger.info(
-        "Reading stream from Redpanda topic '%s'...",
-        settings.redpanda.news_content_topic,
-    )
+        # You would typically have a component here for vector embedding and DB persistence
+        # For this example, we'll simulate the process and update the metrics
 
-    # Read the streaming data from Kafka (Redpanda)
-    kafka_stream_df = (
-        spark.readStream.format("kafka")
-        .option("kafka.bootstrap.servers", f"redpanda:{settings.redpanda.internal_port}")
-        .option("subscribe", settings.redpanda.news_content_topic)
-        .load()
-    )
+        for batch in broker.consume_batch(
+                topic=settings.redpanda.news_content_topic,
+                schema=NewsData,
+                batch_size=5,
+                timeout=2.0,
+                group_id="news-nlp-processor",
+        ):
+            PROCESSING_BATCH_SIZE.set(len(batch))
 
-    # Parse the JSON from the Kafka message and apply NLP transformations
-    parsed_df = kafka_stream_df.selectExpr("CAST(value AS STRING)")
-    news_df = (
-        parsed_df.select(from_json(col("value"), schema).alias("data"))
-        .select("data.*")
-        .filter(col("content").isNotNull())
-    )
+            if not batch:
+                time.sleep(1)
+                continue
 
-    # Apply NLP UDFs
-    transformed_df = news_df.withColumn(
-        "ner_entities", ner_udf(col("content"))
-    ).withColumn("keywords", keywords_udf(col("content")))
+            with BATCH_PROCESSING_DURATION_SECONDS.time():
+                try:
+                    for news in batch:
+                        CONTENT_CONSUMED_TOTAL.inc()
 
-    # Prepare data for output
-    output_df = transformed_df.select(
-        "url",
-        "title",
-        "summary",
-        "ner_entities",
-        "keywords",
-    )
+                        # --- Simulate Embedding Generation ---
+                        with EMBEDDING_DURATION_SECONDS.time():
+                            # Placeholder for semantic embedding logic
+                            # Example: embedding_vector = some_embedding_model.get_embedding(news.summary)
+                            # This part of the code needs to be implemented.
+                            # For now, we simulate the time taken.
+                            time.sleep(0.1)
 
-    # Write the enriched data back to the console for demonstration
-    query = (
-        output_df.writeStream.outputMode("append")
-        .format("console")
-        .start()
-    )
+                            # --- Simulate Vector Database Persistence ---
+                        with VECTOR_DB_UPSERT_DURATION_SECONDS.time():
+                            # Placeholder for Qdrant persistence logic
+                            # Example: qdrant_client.upsert(points=[news.to_qdrant_point(embedding_vector)])
+                            # This part of the code needs to be implemented.
+                            # For now, we simulate the time taken.
+                            time.sleep(0.1)
 
-    query.awaitTermination()
+                    ARTICLES_PERSISTED_TOTAL.inc(len(batch))
+                    logger.info(f"Processed and persisted {len(batch)} news articles.")
+                    broker.commit_offsets()
+
+                except Exception as e:
+                    logger.exception(f"Error processing batch: {e}")
+                    PROCESSOR_ERRORS_TOTAL.labels(error_type="processing_error").inc()
+
+            PROCESSING_BATCH_SIZE.set(0)  # Reset gauge after batch completion
 
 
 if __name__ == "__main__":

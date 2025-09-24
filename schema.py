@@ -18,6 +18,7 @@ class NewsData:
     title: str
     content: str
     link: str
+    keywords: Optional[list[str]]
     published_datetime: datetime
     images: Optional[list[str]]
     summary: Optional[str] = None

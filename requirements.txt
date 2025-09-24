@@ -28,22 +28,25 @@ apscheduler>=3.10.4
 # ORM
 sqlalchemy>=2.0.0
 
-# Optional: OpenAI SDK
-openai==0.28.0
+# OpenAI & LangChain
+openai>=1.104.2
+langchain>=0.3.23
+langchain-community>=0.3.16
+langchain-openai>=0.3.33
 
-# Optional: if using LangChain
-langchain==0.3.23
-langchain-community==0.3.16
+# Vector Database
+qdrant-client
+grpcio # Qdrant client depends on this for gRPC communication
 
-# If you're using ChromaDB for vector storage
-chromadb==1.0.4
-fastapi==0.115.9
+# Robustness and Monitoring
+tenacity # For retry logic with exponential backoff
+prometheus-client # For exposing application metrics
+numpy # A common dependency for many data science and NLP packages
 
+# Other tools
 confluent-kafka>=2.5.3
 redis
-pyspark>=3.5.0
-yake>=0.4.8
-pandas>=2.2.0
 
+yake>=0.4.8
 tiktoken
 hazm

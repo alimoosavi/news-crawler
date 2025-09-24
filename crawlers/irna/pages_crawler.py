@@ -94,14 +94,22 @@ class IRNAPageCrawler:
                 if src and src not in images:
                     images.append(src)
 
+            # --- New Logic for Keywords ---
+            keywords = [
+                tag.get_text(strip=True)
+                for tag in soup.select("section.tags li a")
+            ]
+
+            # --- Updated NewsData Creation ---
             return NewsData(
                 source=link_data.source,
                 title=title,
                 content=content,
-                published_datetime=link_data.published_datetime,
-                images=images or None,
-                summary=summary,
                 link=link_data.link,
+                keywords=keywords if keywords else None,
+                published_datetime=link_data.published_datetime,
+                images=images if images else None,
+                summary=summary,
             )
         except Exception as e:
             self.logger.error(f"Error parsing HTML for {link_data.link}: {e}", exc_info=True)
