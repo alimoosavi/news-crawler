@@ -11,3 +11,9 @@ __pycache__
 cache.json
 
 settings.json
+
+data
+
+jars
+
+local_cache
