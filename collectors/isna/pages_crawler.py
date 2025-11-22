@@ -8,7 +8,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 from config import settings
-from crawlers.isna.page_parser import extract_news_article
+from collectors.isna.page_parser import extract_news_article
 from database_manager import DatabaseManager
 
 

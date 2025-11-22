@@ -96,9 +96,11 @@ class RedisConfig(BaseSettings):
 # Qdrant Vector DB Config
 # ---------------------------
 class QdrantConfig(BaseSettings):
+    host: str = Field(default="localhost")
     port: int = Field(default=6333)
     grpc_port: int = Field(default=6334)
     log_level: str = Field(default="INFO")
+    collection_name: str = Field(default="news")
 
     class Config:
         env_prefix = "QDRANT_"
@@ -110,6 +112,8 @@ class QdrantConfig(BaseSettings):
 # ---------------------------
 class OpenAIConfig(BaseSettings):
     api_key: str = Field(default="")
+    embedding_model_name: str = Field(default="text-embedding-3-small")
+    embedding_dim: int = Field(default=1536)
 
     class Config:
         env_prefix = "OPENAI_"
@@ -166,6 +170,21 @@ class GrafanaConfig(BaseSettings):
 
 
 # ---------------------------
+# News Backlog Postgres Config
+# ---------------------------
+class DatabaseConfig(BaseSettings):
+    host: str = Field(default="localhost")
+    port: int = Field(default=5432)
+    db: str = Field(default="news")
+    user: str = Field(default="news_user")
+    password: str = Field(default="news_password")
+
+    class Config:
+        env_prefix = "POSTGRES_"
+        case_sensitive = False
+
+
+# ---------------------------
 # Main Settings
 # ---------------------------
 class Settings(BaseSettings):
@@ -181,6 +200,7 @@ class Settings(BaseSettings):
     huggingface: HuggingFaceConfig = HuggingFaceConfig()
     prom: PrometheusConfig = PrometheusConfig()
     grafana: GrafanaConfig = GrafanaConfig()
+    database: DatabaseConfig = DatabaseConfig()
 
     class Config:
         case_sensitive = False

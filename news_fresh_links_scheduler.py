@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Scheduler for crawling news links with Kafka
-"""
-
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +8,10 @@ from prometheus_client import Gauge, Counter, Summary, start_http_server, Info
 from broker_manager import BrokerManager
 from cache_manager import CacheManager
 from config import settings
-from crawlers.irna.links_crawler import IRNALinksCrawler
+from collectors.donyaye_eghtesad.daily_links_collector import DonyaEqtesadDailyLinksCollector
+from collectors.irna.fresh_links_collector import IRNAFreshLinksCollector
+from schema import LinksCollectingMetrics
+from news_publishers import IRNA, DONYAYE_EQTESAD
 
 # -------------------------------
 # Logging
@@ -70,12 +68,16 @@ CRAWL_DURATION_SECONDS = Summary(
 )
 
 # -------------------------------
-# News sources and crawlers
+# News sources and collectors
 # -------------------------------
-NEWS_SOURCES = ["IRNA"]
+NEWS_SOURCES = [
+    IRNA,
+    DONYAYE_EQTESAD
+]
 
 LINK_CRAWLERS = {
-    "IRNA": IRNALinksCrawler
+    IRNA: IRNAFreshLinksCollector,
+    DONYAYE_EQTESAD: DonyaEqtesadDailyLinksCollector,
 }
 
 
@@ -83,11 +85,7 @@ LINK_CRAWLERS = {
 # Cache Manager
 # -------------------------------
 def get_cache_manager() -> CacheManager:
-    cache_manager = CacheManager(
-        host=settings.redis.host,
-        port=settings.redis.port,
-    )
-    return cache_manager
+    return CacheManager()
 
 
 # -------------------------------
@@ -106,11 +104,14 @@ def crawl_links_for_source(source: str, broker_manager: BrokerManager, cache_man
 
             # Inject broker manager into crawler
             crawler = LINK_CRAWLERS[source](broker_manager)
-            new_links = crawler.crawl_recent_links(last_link)
+
+            # EXPECT LinksCrawlingMetrics object
+            metrics: LinksCollectingMetrics = crawler.crawl_recent_links(last_link)
 
             # Update metrics based on the crawler's output
-            if new_links:
-                num_scraped = len(new_links)
+            if metrics.links_scraped_count > 0:
+                num_scraped = metrics.links_scraped_count
+
                 LINKS_SCRAPED.labels(source=source).inc(num_scraped)
 
                 # The crawler's internal logic should handle Kafka production
@@ -118,11 +119,14 @@ def crawl_links_for_source(source: str, broker_manager: BrokerManager, cache_man
                 # For this example, we assume all scraped links are produced.
                 LINKS_PRODUCED.labels(source=source).inc(num_scraped)
 
-                fresh_last_link = new_links[0]
-                cache_manager.update_last_link(source, fresh_last_link)
-                LAST_CRAWL_TIMESTAMP.labels(source=source).set(time.time())
+                fresh_last_link = metrics.latest_link
+                if fresh_last_link:
+                    logger.info(f"[{source}] Last crawled link: {fresh_last_link}")
+                    cache_manager.update_last_link(source, fresh_last_link)
+                    LAST_CRAWL_TIMESTAMP.labels(source=source).set(time.time())
 
-            logger.info(f"[{source}] Link crawl finished")
+            logger.info(
+                f"[{source}] Link crawl finished. Scraped: {metrics.links_scraped_count}, New Last Link: {metrics.latest_link}")
 
         except Exception as e:
             logger.exception(f"[{source}] Link crawl failed: {e}")

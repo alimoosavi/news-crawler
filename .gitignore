@@ -1,5 +1,7 @@
 venv
 
+.venv
+
 .idea
 
 __pycache__
@@ -17,3 +19,5 @@ data
 jars
 
 local_cache
+
+last_links_cache.json

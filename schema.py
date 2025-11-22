@@ -20,5 +20,15 @@ class NewsData:
     link: str
     keywords: Optional[list[str]]
     published_datetime: datetime
+    published_timestamp: int
     images: Optional[list[str]]
     summary: Optional[str] = None
+
+
+@dataclass
+class LinksCollectingMetrics:
+    """
+    A unified structure for collectors to report their results back to the scheduler.
+    """
+    latest_link: Optional[str] = None
+    links_scraped_count: int = 0

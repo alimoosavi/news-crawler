@@ -1,7 +1,7 @@
 from typing import Dict, Type
 
-from crawlers.irna.irna_source import IRNANewsSource
-from crawlers.isna.isna_source import ISNANewsSource
+from collectors.irna.irna_source import IRNANewsSource
+from collectors.isna.isna_source import ISNANewsSource
 from . import NewsSourceInterface
 
 

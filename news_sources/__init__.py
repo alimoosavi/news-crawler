@@ -4,7 +4,7 @@ from datetime import datetime, date
 
 class NewsSourceInterface(ABC):
     """
-    Abstract interface for news source crawlers
+    Abstract interface for news source collectors
     """
     
     @property

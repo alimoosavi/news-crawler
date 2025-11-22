@@ -1,202 +1,53 @@
-version: '3'
+version: "3.9"
+
 services:
+  # ============================================================================
+  # SELENIUM CHROME (Collector-Specific)
+  # ============================================================================
   chrome:
     image: selenium/standalone-chrome:4.15.0
-    container_name: webdriver
+    container_name: news-collector-chrome
+    restart: unless-stopped
     ports:
-      - "${SE_PORT}:${SE_PORT}"
+      - "${SE_PORT}:4444"
     shm_size: "512m"
     environment:
-      - SE_NODE_MAX_SESSIONS
-      - SE_NODE_SESSION_TIMEOUT
+      - SE_NODE_MAX_SESSIONS=${SE_NODE_MAX_SESSIONS}
+      - SE_NODE_SESSION_TIMEOUT=${SE_NODE_SESSION_TIMEOUT}
     networks:
-      - monitoring
+      - collector_network
+      - news_shared_network
 
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:${REDPANDA_VERSION}
-    container_name: broker
+  # ============================================================================
+  # POSTGRES BACKLOG (Collector-Specific - Temporary Storage)
+  # ============================================================================
+  news_backlog:
+    image: postgres:${POSTGRES_VERSION:-15}
+    container_name: news-collector-backlog
     restart: always
-    command:
-      - redpanda start
-      - --smp ${REDPANDA_SMP}
-      - --overprovisioned
-      - --kafka-addr internal://0.0.0.0:${REDPANDA_INTERNAL_PORT},external://0.0.0.0:${REDPANDA_EXTERNAL_PORT}
-      - --advertise-kafka-addr internal://redpanda:${REDPANDA_INTERNAL_PORT},external://localhost:${REDPANDA_EXTERNAL_PORT}
-    ports:
-      - "${REDPANDA_EXTERNAL_PORT}:${REDPANDA_EXTERNAL_PORT}"
-      - "${REDPANDA_ADMIN_PORT}:${REDPANDA_ADMIN_PORT}"
-    volumes:
-      - ./data/redpanda:/var/lib/redpanda/data
-    networks:
-      - monitoring
-
-  redpanda_console:
-    image: docker.redpanda.com/redpandadata/console:${REDPANDA_CONSOLE_VERSION}
-    container_name: broker-console
-    restart: always
-    entrypoint: /bin/sh
-    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml && /app/console'
     environment:
-      CONFIG_FILEPATH: /tmp/config.yml
-      CONSOLE_CONFIG_FILE: |
-        kafka:
-          brokers: ["redpanda:${REDPANDA_INTERNAL_PORT}"]
-        redpanda:
-          adminApi:
-            enabled: true
-            urls: ["http://redpanda:${REDPANDA_ADMIN_PORT}"]
+      POSTGRES_DB: ${POSTGRES_BACKLOG_DB}
+      POSTGRES_USER: ${POSTGRES_BACKLOG_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_BACKLOG_PASSWORD}
     ports:
-      - "${REDPANDA_CONSOLE_PORT}:8080"
-    depends_on:
-      - redpanda
-    networks:
-      - monitoring
-
-  redis:
-    image: redis:7
-    container_name: redis
-    ports:
-      - "${REDIS_PORT}:${REDIS_PORT}"
+      - "${POSTGRES_BACKLOG_PORT:-5434}:5432"
     volumes:
-      - redis_data:/data
-    command: [ "redis-server", "--appendonly", "yes" ]
-    environment:
-      - REDIS_HOST
-      - REDIS_PORT
-      - REDIS_DB
+      - news_backlog_data:/var/lib/postgresql/data
+    networks:
+      - collector_network
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_BACKLOG_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - monitoring
-
-  redisinsight:
-    image: redislabs/redisinsight:latest
-    container_name: redisinsight
-    ports:
-      - "${REDISINSIGHT_PORT}:5540"
-    depends_on:
-      - redis
-    environment:
-      - RI_HOST
-    volumes:
-      - redisinsight_data:/db
-    networks:
-      - monitoring
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    restart: unless-stopped
-    ports:
-      - "${QDRANT_PORT}:6333"
-      - "${QDRANT_GRPC_PORT}:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    environment:
-      - QDRANT__SERVICE__HTTP_PORT=6333
-      - QDRANT__SERVICE__GRPC_PORT=6334
-      - QDRANT__LOG_LEVEL=INFO
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:6333/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-    networks:
-      - monitoring
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    ports:
-      - "${PROMETHEUS_PORT}:${PROMETHEUS_PORT}"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    networks:
-      - monitoring
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    ports:
-      - "${GRAFANA_PORT}:${GRAFANA_PORT}"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - monitoring
-    environment:
-      - GF_SECURITY_ADMIN_USER
-      - GF_SECURITY_ADMIN_PASSWORD
-    depends_on:
-      - prometheus
-
-  # ---------------------------------------------
-  # Your Python Services for Development
-  # ---------------------------------------------
-
-  news-links-crawler:
-    image: base_crawler_image:latest
-    container_name: news-links-crawler
-    volumes:
-      - .:/app
-    working_dir: /app
-    command: python news_links_crawler.py
-    ports:
-      - "${NEWS_LINKS_CRAWLER_PORT}:${NEWS_LINKS_CRAWLER_PORT}"
-    networks:
-      - monitoring
-    depends_on:
-      - redpanda
-      - redis
-
-  news-content-crawler:
-    image: base_crawler_image:latest
-    container_name: news-content-crawler
-    volumes:
-      - .:/app
-    working_dir: /app
-    command: python news_content_crawler.py
-    ports:
-      - "${NEWS_CONTENT_CRAWLER_PORT}:${NEWS_CONTENT_CRAWLER_PORT}"
-    networks:
-      - monitoring
-    depends_on:
-      - redpanda
-      - chrome
-
-  news-processor:
-    image: base_crawler_image:latest
-    container_name: news-processor
-    volumes:
-      - .:/app
-    working_dir: /app
-    command: python news_processor.py
-    ports:
-      - "${NEWS_PROCESSOR_PORT}:${NEWS_PROCESSOR_PORT}"
-    networks:
-      - monitoring
-    depends_on:
-      - redpanda
-      - qdrant
 
 volumes:
-  redis_data:
-  redisinsight_data:
-  qdrant_data:
-  prometheus_data:
-  grafana_data:
+  news_backlog_data:
 
 networks:
-  monitoring:
+  collector_network:
     driver: bridge
+
+  # Connect to shared infrastructure network
+  news_shared_network:
+    external: true

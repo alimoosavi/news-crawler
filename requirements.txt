@@ -6,8 +6,6 @@ lxml>=4.9.0
 # Selenium for browser automation
 selenium>=4.15.0
 
-# Database
-psycopg2-binary>=2.9.0
 
 # Configuration management
 pydantic==2.7.4
@@ -25,9 +23,6 @@ colorlog==6.8.0
 # Scheduler for periodic jobs
 apscheduler>=3.10.4
 
-# ORM
-sqlalchemy>=2.0.0
-
 # OpenAI & LangChain
 openai>=1.104.2
 langchain>=0.3.23
@@ -35,18 +30,31 @@ langchain-community>=0.3.16
 langchain-openai>=0.3.33
 
 # Vector Database
-qdrant-client
-grpcio # Qdrant client depends on this for gRPC communication
+qdrant-client>=1.15.0
+grpcio>=1.56.0  # Qdrant client depends on this for gRPC communication
 
 # Robustness and Monitoring
-tenacity # For retry logic with exponential backoff
-prometheus-client # For exposing application metrics
-numpy # A common dependency for many data science and NLP packages
+tenacity>=8.2.2
+prometheus-client>=0.17.0
+numpy>=1.25.2
 
 # Other tools
 confluent-kafka>=2.5.3
-redis
+redis>=5.0.0
 
 yake>=0.4.8
-tiktoken
-hazm
+tiktoken>=0.4.0
+hazm>=0.7.0
+
+sentence-transformers>=2.2.2
+torch>=2.1.0
+
+huggingface-hub>=0.16.4
+
+playwright
+
+# Database management
+sqlalchemy>=2.0.0
+psycopg
+psycopg2-binary>=2.9.0
+alembic>=1.13.0

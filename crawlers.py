@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 
 
 class BaseCrawler:
-    """Base class for asynchronous news crawlers."""
+    """Base class for asynchronous news collectors."""
 
     def __init__(self, logger, news_links: List[str]):
         self.logger = logger

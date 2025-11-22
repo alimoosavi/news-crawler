@@ -3,8 +3,8 @@ import time
 import signal
 import logging
 from typing import List
-from crawlers.page_crawler.dispatcher import NewsLinkDispatcher
-from crawlers.page_crawler.worker import NewsWorker
+from collectors.page_crawler.dispatcher import NewsLinkDispatcher
+from collectors.page_crawler.worker import NewsWorker
 from database_manager import DatabaseManager
 from config import settings
 from news_sources import NewsSourceInterface
