@@ -108,9 +108,99 @@ class QdrantConfig(BaseSettings):
 
 
 # ---------------------------
-# OpenAI Config
+# Embedding Config (Provider-agnostic)
+# ---------------------------
+class EmbeddingConfig(BaseSettings):
+    """
+    Unified embedding configuration supporting multiple providers.
+    
+    Providers:
+    - 'openai': Use OpenAI API (requires OPENAI_API_KEY)
+    - 'ollama': Use local Ollama models (requires Ollama running)
+    
+    Model dimensions:
+    - text-embedding-3-small: 1536
+    - text-embedding-3-large: 3072
+    - bge-m3: 1024
+    - multilingual-e5-base: 768
+    - multilingual-e5-large: 1024
+    """
+    
+    # Provider selection
+    provider: str = Field(
+        default="openai",
+        description="Embedding provider: 'openai' or 'ollama'"
+    )
+    
+    # OpenAI settings
+    openai_api_key: str = Field(default="", description="OpenAI API key")
+    openai_model: str = Field(
+        default="text-embedding-3-small",
+        description="OpenAI embedding model name"
+    )
+    
+    # Ollama settings
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        description="Ollama API endpoint"
+    )
+    ollama_model: str = Field(
+        default="bge-m3",
+        description="Ollama model name (bge-m3, multilingual-e5-base, etc.)"
+    )
+    
+    # Auto-computed embedding dimension based on provider and model
+    @property
+    def embedding_dim(self) -> int:
+        """Automatically determine embedding dimension based on provider and model"""
+        if self.provider == "openai":
+            return self._get_openai_dimension()
+        elif self.provider == "ollama":
+            return self._get_ollama_dimension()
+        else:
+            raise ValueError(f"Unknown embedding provider: {self.provider}")
+    
+    def _get_openai_dimension(self) -> int:
+        """Get OpenAI model embedding dimension"""
+        openai_dims = {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
+        }
+        return openai_dims.get(self.openai_model, 1536)
+    
+    def _get_ollama_dimension(self) -> int:
+        """Get Ollama model embedding dimension"""
+        ollama_dims = {
+            "bge-m3": 1024,
+            "multilingual-e5-base": 768,
+            "multilingual-e5-large": 1024,
+            "nomic-embed-text": 768,
+            "mxbai-embed-large": 1024,
+            "all-minilm": 384,
+        }
+        # Try exact match first
+        if self.ollama_model in ollama_dims:
+            return ollama_dims[self.ollama_model]
+        
+        # Try partial match (for community models like zylonai/multilingual-e5-large)
+        for model_key, dim in ollama_dims.items():
+            if model_key in self.ollama_model:
+                return dim
+        
+        # Default fallback
+        return 1024
+
+    class Config:
+        env_prefix = "EMBEDDING_"
+        case_sensitive = False
+
+
+# ---------------------------
+# OpenAI Config (Legacy - kept for backward compatibility)
 # ---------------------------
 class OpenAIConfig(BaseSettings):
+    """Legacy OpenAI config - prefer using EmbeddingConfig instead"""
     api_key: str = Field(default="")
     embedding_model_name: str = Field(default="text-embedding-3-small")
     embedding_dim: int = Field(default=1536)
@@ -195,7 +285,8 @@ class Settings(BaseSettings):
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
     qdrant: QdrantConfig = QdrantConfig()
-    openai: OpenAIConfig = OpenAIConfig()
+    embedding: EmbeddingConfig = EmbeddingConfig()  # NEW: Unified embedding config
+    openai: OpenAIConfig = OpenAIConfig()  # Legacy support
     spark: SparkConfig = SparkConfig()
     huggingface: HuggingFaceConfig = HuggingFaceConfig()
     prom: PrometheusConfig = PrometheusConfig()

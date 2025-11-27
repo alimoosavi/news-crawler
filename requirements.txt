@@ -58,3 +58,9 @@ sqlalchemy>=2.0.0
 psycopg
 psycopg2-binary>=2.9.0
 alembic>=1.13.0
+
+pandas
+matplotlib
+
+# Ollama embedding provider (install if using Ollama)
+ollama==0.1.6
