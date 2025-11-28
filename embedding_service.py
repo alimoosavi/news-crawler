@@ -1,23 +1,43 @@
 """
-Abstract Embedding Service with Multiple Provider Implementations
-Supports: OpenAI API, Ollama (local models)
+Optimized Abstract Embedding Service with Concurrent Processing
+Supports: OpenAI API, Ollama (local models) with parallel batch processing
 """
 import logging
 from abc import ABC, abstractmethod
 from typing import List
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
-from prometheus_client import Summary
+from prometheus_client import Summary, Histogram
 
 # Metrics
-EMBEDDING_LATENCY = Summary('embedding_generation_latency_seconds', 'Latency of embedding generation', ['provider'])
+EMBEDDING_LATENCY = Summary(
+    'embedding_generation_latency_seconds', 
+    'Latency of embedding generation', 
+    ['provider']
+)
+EMBEDDING_BATCH_SIZE = Histogram(
+    'embedding_batch_size',
+    'Number of texts in embedding batch',
+    ['provider'],
+    buckets=[1, 5, 10, 20, 50, 100]
+)
+CONCURRENT_REQUESTS = Histogram(
+    'embedding_concurrent_requests',
+    'Number of concurrent embedding requests',
+    ['provider'],
+    buckets=[1, 2, 5, 10, 20]
+)
 
 
 class EmbeddingService(ABC):
     """Abstract base class for embedding services"""
     
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, max_workers: int = 10, chunk_size: int = 5):
         self.logger = logger
+        self.max_workers = max_workers
+        self.chunk_size = chunk_size
     
     @abstractmethod
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -44,10 +64,17 @@ class EmbeddingService(ABC):
 
 
 class OpenAIEmbeddingService(EmbeddingService):
-    """OpenAI API-based embedding service using LangChain"""
+    """OpenAI API-based embedding service with batch optimization"""
     
-    def __init__(self, api_key: str, model_name: str, logger: logging.Logger):
-        super().__init__(logger)
+    def __init__(
+        self, 
+        api_key: str, 
+        model_name: str, 
+        logger: logging.Logger,
+        max_workers: int = 10,
+        chunk_size: int = 5
+    ):
+        super().__init__(logger, max_workers, chunk_size)
         
         if not api_key:
             raise ValueError("OpenAI API key is required for OpenAIEmbeddingService")
@@ -70,7 +97,8 @@ class OpenAIEmbeddingService(EmbeddingService):
         self.dimension = self._get_dimension_from_model()
         
         self.logger.info(
-            f"✅ OpenAI Embedding Service initialized: model={model_name}, dim={self.dimension}"
+            f"✅ OpenAI Embedding Service initialized: model={model_name}, "
+            f"dim={self.dimension}, max_workers={max_workers}"
         )
     
     def _get_dimension_from_model(self) -> int:
@@ -84,7 +112,10 @@ class OpenAIEmbeddingService(EmbeddingService):
     
     @EMBEDDING_LATENCY.labels(provider='openai').time()
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using OpenAI API"""
+        """
+        Generate embeddings using OpenAI API with batch processing.
+        OpenAI API supports batch requests natively, so we use that.
+        """
         if not texts:
             return []
         
@@ -93,7 +124,10 @@ class OpenAIEmbeddingService(EmbeddingService):
         if not non_empty_texts:
             return []
         
+        EMBEDDING_BATCH_SIZE.labels(provider='openai').observe(len(non_empty_texts))
+        
         try:
+            # OpenAI API handles batching efficiently internally
             vectors = self.embeddings.embed_documents(non_empty_texts)
             
             # Validate dimensions
@@ -116,10 +150,17 @@ class OpenAIEmbeddingService(EmbeddingService):
 
 
 class OllamaEmbeddingService(EmbeddingService):
-    """Ollama local model embedding service"""
+    """Ollama local model embedding service with concurrent processing"""
     
-    def __init__(self, host: str, model_name: str, logger: logging.Logger):
-        super().__init__(logger)
+    def __init__(
+        self, 
+        host: str, 
+        model_name: str, 
+        logger: logging.Logger,
+        max_workers: int = 10,
+        chunk_size: int = 5
+    ):
+        super().__init__(logger, max_workers, chunk_size)
         
         self.host = host
         self.model_name = model_name
@@ -150,7 +191,8 @@ class OllamaEmbeddingService(EmbeddingService):
         self.dimension = self._detect_dimension()
         
         self.logger.info(
-            f"✅ Ollama Embedding Service initialized: model={model_name}, dim={self.dimension}"
+            f"✅ Ollama Embedding Service initialized: model={model_name}, "
+            f"dim={self.dimension}, max_workers={max_workers}, chunk_size={chunk_size}"
         )
     
     def _ensure_model_exists(self):
@@ -200,9 +242,34 @@ class OllamaEmbeddingService(EmbeddingService):
                     return dim
             return 1024  # Default fallback
     
+    def _embed_single(self, text: str) -> List[float]:
+        """Generate embedding for a single text"""
+        try:
+            response = self.ollama.embeddings(
+                model=self.model_name,
+                prompt=text
+            )
+            embedding = response['embedding']
+            
+            # Validate dimension
+            if len(embedding) != self.dimension:
+                raise ValueError(
+                    f"Expected dimension {self.dimension}, got {len(embedding)}"
+                )
+            
+            return embedding
+        except Exception as e:
+            self.logger.error(f"Failed to embed text: {e}")
+            raise
+    
     @EMBEDDING_LATENCY.labels(provider='ollama').time()
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Ollama"""
+        """
+        Generate embeddings using Ollama with concurrent processing.
+        
+        This method splits the texts into chunks and processes them
+        concurrently using ThreadPoolExecutor for significant speedup.
+        """
         if not texts:
             return []
         
@@ -211,30 +278,53 @@ class OllamaEmbeddingService(EmbeddingService):
         if not non_empty_texts:
             return []
         
-        embeddings = []
+        EMBEDDING_BATCH_SIZE.labels(provider='ollama').observe(len(non_empty_texts))
         
-        try:
-            # Ollama processes one at a time (could be parallelized in future)
-            for text in non_empty_texts:
-                response = self.ollama.embeddings(
-                    model=self.model_name,
-                    prompt=text
-                )
-                embedding = response['embedding']
-                
-                # Validate dimension
-                if len(embedding) != self.dimension:
-                    raise ValueError(
-                        f"Expected dimension {self.dimension}, got {len(embedding)}"
-                    )
-                
-                embeddings.append(embedding)
+        start_time = time.time()
+        
+        # Create a mapping to preserve order
+        text_to_index = {i: text for i, text in enumerate(non_empty_texts)}
+        embeddings = [None] * len(non_empty_texts)
+        
+        # Use ThreadPoolExecutor for concurrent processing
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_index = {
+                executor.submit(self._embed_single, text): idx
+                for idx, text in text_to_index.items()
+            }
             
-            return embeddings
+            CONCURRENT_REQUESTS.labels(provider='ollama').observe(len(future_to_index))
             
-        except Exception as e:
-            self.logger.error(f"Ollama embedding generation failed: {e}")
-            raise
+            # Collect results as they complete
+            completed = 0
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                try:
+                    embedding = future.result()
+                    embeddings[idx] = embedding
+                    completed += 1
+                    
+                    # Log progress for large batches
+                    if completed % 10 == 0 or completed == len(non_empty_texts):
+                        elapsed = time.time() - start_time
+                        rate = completed / elapsed if elapsed > 0 else 0
+                        self.logger.debug(
+                            f"Progress: {completed}/{len(non_empty_texts)} "
+                            f"({rate:.1f} emb/s)"
+                        )
+                except Exception as e:
+                    self.logger.error(f"Failed to get embedding for index {idx}: {e}")
+                    raise
+        
+        elapsed = time.time() - start_time
+        rate = len(non_empty_texts) / elapsed if elapsed > 0 else 0
+        self.logger.info(
+            f"✅ Generated {len(non_empty_texts)} embeddings in {elapsed:.2f}s "
+            f"({rate:.1f} emb/s)"
+        )
+        
+        return embeddings
     
     def get_dimension(self) -> int:
         return self.dimension
@@ -252,6 +342,9 @@ def create_embedding_service(
     # Ollama params
     ollama_host: str = None,
     ollama_model: str = None,
+    # Concurrency params
+    max_workers: int = 10,
+    chunk_size: int = 5,
 ) -> EmbeddingService:
     """
     Factory function to create the appropriate embedding service.
@@ -263,6 +356,8 @@ def create_embedding_service(
         openai_model: OpenAI model name (if provider='openai')
         ollama_host: Ollama host URL (if provider='ollama')
         ollama_model: Ollama model name (if provider='ollama')
+        max_workers: Maximum concurrent workers for parallel processing
+        chunk_size: Number of texts per chunk (currently unused, for future optimization)
     
     Returns:
         EmbeddingService instance
@@ -275,12 +370,24 @@ def create_embedding_service(
     if provider == "openai":
         if not openai_api_key or not openai_model:
             raise ValueError("OpenAI provider requires api_key and model_name")
-        return OpenAIEmbeddingService(openai_api_key, openai_model, logger)
+        return OpenAIEmbeddingService(
+            openai_api_key, 
+            openai_model, 
+            logger,
+            max_workers=max_workers,
+            chunk_size=chunk_size
+        )
     
     elif provider == "ollama":
         if not ollama_host or not ollama_model:
             raise ValueError("Ollama provider requires host and model_name")
-        return OllamaEmbeddingService(ollama_host, ollama_model, logger)
+        return OllamaEmbeddingService(
+            ollama_host, 
+            ollama_model, 
+            logger,
+            max_workers=max_workers,
+            chunk_size=chunk_size
+        )
     
     else:
         raise ValueError(

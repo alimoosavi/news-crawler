@@ -118,10 +118,15 @@ class EmbeddingConfig(BaseSettings):
     - 'openai': Use OpenAI API (requires OPENAI_API_KEY)
     - 'ollama': Use local Ollama models (requires Ollama running)
     
+    Performance Settings:
+    - max_concurrent_requests: Controls parallelism (higher = faster but more CPU)
+    - chunk_size: Batch size for processing (affects memory usage)
+    
     Model dimensions:
     - text-embedding-3-small: 1536
     - text-embedding-3-large: 3072
     - bge-m3: 1024
+    - mxbai-embed-large: 1024
     - multilingual-e5-base: 768
     - multilingual-e5-large: 1024
     """
@@ -147,6 +152,16 @@ class EmbeddingConfig(BaseSettings):
     ollama_model: str = Field(
         default="bge-m3",
         description="Ollama model name (bge-m3, multilingual-e5-base, etc.)"
+    )
+    
+    # Concurrent processing settings (NEW)
+    max_concurrent_requests: int = Field(
+        default=10,
+        description="Maximum concurrent embedding requests (for parallel processing)"
+    )
+    chunk_size: int = Field(
+        default=5,
+        description="Number of texts to process in each concurrent chunk"
     )
     
     # Auto-computed embedding dimension based on provider and model
@@ -285,7 +300,7 @@ class Settings(BaseSettings):
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
     qdrant: QdrantConfig = QdrantConfig()
-    embedding: EmbeddingConfig = EmbeddingConfig()  # NEW: Unified embedding config
+    embedding: EmbeddingConfig = EmbeddingConfig()  # Unified embedding config
     openai: OpenAIConfig = OpenAIConfig()  # Legacy support
     spark: SparkConfig = SparkConfig()
     huggingface: HuggingFaceConfig = HuggingFaceConfig()

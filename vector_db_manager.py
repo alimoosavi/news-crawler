@@ -2,12 +2,12 @@
 Vector Database Manager for newsLens
 
 Manages embeddings and Qdrant vector storage with support for multiple
-embedding providers (OpenAI, Ollama).
+embedding providers (OpenAI, Ollama) with concurrent processing.
 
 Key Features:
 - Auto-creates Qdrant collection on first run
 - Validates dimension compatibility (fails fast if model changed)
-- Batch embedding for performance
+- Batch embedding for performance with concurrent processing
 - Retry logic with exponential backoff
 """
 import logging
@@ -45,6 +45,8 @@ class VectorDBManager:
     Automatically detects embedding dimension based on configured provider.
     Fails fast if you try to use a different embedding model than what
     the collection was created with.
+    
+    Supports concurrent embedding generation for improved performance.
     """
 
     def __init__(
@@ -59,7 +61,7 @@ class VectorDBManager:
         
         Args:
             qdrant_config: Qdrant configuration
-            embedding_config: Embedding configuration (provider, model, etc.)
+            embedding_config: Embedding configuration (provider, model, concurrency, etc.)
             logger: Logger instance
             collection_name: Optional collection name (overrides config)
         """
@@ -73,7 +75,7 @@ class VectorDBManager:
             grpc_port=qdrant_config.grpc_port
         )
 
-        # Create embedding service based on provider
+        # Create embedding service based on provider with concurrent processing support
         try:
             self.embedding_service = create_embedding_service(
                 provider=embedding_config.provider,
@@ -82,6 +84,8 @@ class VectorDBManager:
                 openai_model=embedding_config.openai_model,
                 ollama_host=embedding_config.ollama_host,
                 ollama_model=embedding_config.ollama_model,
+                max_workers=embedding_config.max_concurrent_requests,  # NEW: Concurrent processing
+                chunk_size=embedding_config.chunk_size,  # NEW: Chunk size for batching
             )
             
             # Get embedding dimension from the service
@@ -90,7 +94,8 @@ class VectorDBManager:
             
             self.logger.info(
                 f"✅ VectorDBManager initialized with {provider_name} "
-                f"(dimension: {self.embedding_dim})"
+                f"(dimension: {self.embedding_dim}, "
+                f"max_workers: {embedding_config.max_concurrent_requests})"
             )
             
         except Exception as e:
@@ -202,6 +207,9 @@ class VectorDBManager:
         """
         Generate embeddings for a batch of texts using the configured provider.
         
+        This method now supports concurrent processing for improved performance.
+        The concurrency is handled internally by the embedding service.
+        
         Args:
             texts: List of text strings to embed
             
@@ -275,7 +283,7 @@ class VectorDBManager:
         if not articles_to_embed:
             return 0
 
-        # 2. Get embeddings in a single batch
+        # 2. Get embeddings in a single batch with concurrent processing
         self.logger.info(f"Generating embeddings for batch of {len(texts_for_embedding)} articles.")
         vectors: List[List[float]] = []
         try:
