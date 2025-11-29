@@ -45,8 +45,8 @@ def main():
     database_manager = get_db_manager()
 
     today_greg = dt_date.today()
-    start_date_greg = today_greg - timedelta(days=60)
-    end_date_greg = today_greg
+    start_date_greg = dt_date(2024, 11, 29)
+    end_date_greg = dt_date(2025, 9, 24)
 
     print("\n" + "=" * 80)
     print("HISTORICAL LINKS CRAWLER DEMO")
