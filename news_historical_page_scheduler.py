@@ -57,7 +57,7 @@ class NewsScheduler:
         self.collectors: Dict[str, object] = {
             IRNA: IRNAPageCollector(),
             ISNA: ISNAPageCollector(),
-            # TASNIM: TasnimPageCollector(),
+            TASNIM: TasnimPageCollector(),
             DONYAYE_EQTESAD: DonyaEqtesadPageCollector(),
 
         }
