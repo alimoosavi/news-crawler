@@ -21,6 +21,11 @@ class DatabaseManager:
     - Single UPDATE for batch operations
     - Connection pooling
     - Prepared statements
+    - Source-filtered queries (optional)
+    
+    Source Filtering:
+    - Use get_pending_news_batch() to fetch from ALL sources (default)
+    - Use get_pending_news_batch_by_source(source) to filter by specific source
     """
 
     def __init__(self, db_config: DatabaseConfig):
@@ -234,8 +239,22 @@ class DatabaseManager:
         """Alias to optimized method"""
         return self.mark_links_completed_optimized(links)
 
+    # ----------------------------
+    # FETCH PENDING NEWS - DEFAULT (ALL SOURCES)
+    # ----------------------------
     def get_pending_news_batch(self, limit: int = 50) -> List[NewsData]:
-        """Fetch pending news for processing"""
+        """
+        Fetch pending news from ALL SOURCES (default behavior).
+        
+        This is the default method that processes articles regardless of source.
+        Use this when you want to process all news sources together.
+        
+        Args:
+            limit: Maximum number of articles to fetch
+            
+        Returns:
+            List of NewsData objects from all sources
+        """
         with Session(self.engine) as session:
             stmt = (
                 select(NewsContent)
@@ -259,6 +278,105 @@ class DatabaseManager:
                 )
                 for n in orm_news
             ]
+
+    # ----------------------------
+    # FETCH PENDING NEWS - SOURCE-SPECIFIC (OPTIONAL)
+    # ----------------------------
+    def get_pending_news_batch_by_source(
+        self, 
+        source: str, 
+        limit: int = 50
+    ) -> List[NewsData]:
+        """
+        Fetch pending news for a SPECIFIC SOURCE.
+        
+        Use this when you want to process articles from a single source.
+        Useful for parallel processing where each scheduler handles one source.
+        
+        Args:
+            source: News source name (e.g., 'IRNA', 'ISNA', 'Tasnim', 'Donya-e-Eqtesad')
+            limit: Maximum number of articles to fetch
+            
+        Returns:
+            List of NewsData objects for the specified source
+            
+        Example:
+            # Process only IRNA articles
+            news_batch = db_manager.get_pending_news_batch_by_source('IRNA', limit=20)
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(NewsContent)
+                .where(NewsContent.source == source)
+                .where(NewsContent.status == StatusEnum.PENDING)
+                .order_by(NewsContent.published_datetime.asc())
+                .limit(limit)
+            )
+            orm_news = session.scalars(stmt).all()
+
+            news_list = [
+                NewsData(
+                    source=n.source,
+                    title=n.title,
+                    content=n.content,
+                    link=n.link,
+                    keywords=n.keywords,
+                    published_datetime=n.published_datetime,
+                    published_timestamp=n.published_timestamp,
+                    images=n.images,
+                    summary=n.summary,
+                )
+                for n in orm_news
+            ]
+            
+            if news_list:
+                logger.info(
+                    f"Fetched {len(news_list)} pending news items for source '{source}'"
+                )
+            
+            return news_list
+
+    # ----------------------------
+    # MONITORING UTILITIES
+    # ----------------------------
+    def get_pending_count_by_source(self, source: str) -> int:
+        """
+        Get count of pending news items for a specific source.
+        Useful for monitoring and load balancing.
+        
+        Args:
+            source: News source name
+            
+        Returns:
+            Count of pending articles for that source
+        """
+        with Session(self.engine) as session:
+            from sqlalchemy import func
+            stmt = (
+                select(func.count())
+                .select_from(NewsContent)
+                .where(NewsContent.source == source)
+                .where(NewsContent.status == StatusEnum.PENDING)
+            )
+            count = session.scalar(stmt)
+            return count or 0
+
+    def get_total_pending_count(self) -> int:
+        """
+        Get total count of pending news items across ALL sources.
+        
+        Returns:
+            Total count of pending articles
+        """
+        with Session(self.engine) as session:
+            from sqlalchemy import func
+            stmt = (
+                select(func.count())
+                .select_from(NewsContent)
+                .where(NewsContent.status == StatusEnum.PENDING)
+            )
+            count = session.scalar(stmt)
+            return count or 0
 
     def mark_news_completed(self, links: List[str]) -> int:
         """Mark news as completed"""
