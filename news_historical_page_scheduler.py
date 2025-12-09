@@ -17,17 +17,17 @@ NEW FEATURES:
 import argparse
 import logging
 import time
-from typing import List
+from typing import List, Dict
 from datetime import datetime
 
-from collectors.irna.pages_collector import IRNAHistoricalPageCollector
-from collectors.tasnim.pages_collector import TasnimHistoricalPageCollector
-from collectors.donyaye_eghtesad.pages_collector import DonyaEqtesadHistoricalPageCollector
-from collectors.isna.pages_collector import ISNAHistoricalPageCollector
+from collectors.irna.pages_collector import IRNAPageCollector
+from collectors.tasnim.pages_collector import TasnimPageCollector
+from collectors.donyaye_eghtesad.pages_collector import DonyaEqtesadPageCollector
+from collectors.isna.pages_collector import ISNAPageCollector
 from config import settings
 from database_manager import DatabaseManager
 from news_publishers import IRNA, TASNIM, ISNA, DONYAYE_EQTESAD
-from schema import NewsLinkData
+from schema import NewsLinkData, NewsData
 
 logging.basicConfig(
     level=settings.app.log_level,
@@ -37,10 +37,10 @@ logger = logging.getLogger("HistoricalPageScheduler")
 
 # Map each publisher to its page collector class
 HISTORICAL_PAGE_COLLECTORS = {
-    IRNA: IRNAHistoricalPageCollector,
-    TASNIM: TasnimHistoricalPageCollector,
-    DONYAYE_EQTESAD: DonyaEqtesadHistoricalPageCollector,
-    ISNA: ISNAHistoricalPageCollector
+    IRNA: IRNAPageCollector,
+    TASNIM: TasnimPageCollector,
+    DONYAYE_EQTESAD: DonyaEqtesadPageCollector,
+    ISNA: ISNAPageCollector
 }
 
 
@@ -89,13 +89,14 @@ class HistoricalPageScheduler:
             )
         
         CollectorClass = HISTORICAL_PAGE_COLLECTORS[source]
-        self.collector = CollectorClass(db_manager=db_manager)
+        self.collector = CollectorClass()
         
         # Statistics
         self.total_processed = 0
         self.total_failed = 0
         self.total_retries = 0
         self.start_time = time.time()
+        self.batch_count = 0
     
     def process_batch(self) -> bool:
         """
@@ -116,32 +117,29 @@ class HistoricalPageScheduler:
         
         logger.info(f"📥 Fetched {len(pending_links)} pending links for {self.source}")
         
-        # Separate links by retry status
-        fresh_links = []
-        retry_links = []
-        
-        for link_data in pending_links:
-            # Note: We don't have tried_count in NewsLinkData, 
-            # so we treat all as fresh for now
-            fresh_links.append(link_data)
-        
+        # Count retry links
+        retry_links = [link for link in pending_links if hasattr(link, 'tried_count') and link.tried_count > 0]
         if retry_links:
             logger.info(f"  🔄 {len(retry_links)} are retry attempts")
             self.total_retries += len(retry_links)
         
-        # Collect page content
+        # Collect page content using the collector's crawl_batch method
         successful_links = []
         failed_links = []
         
         try:
             # Use the collector to fetch page content
-            # The collector returns NewsData objects and persists them
-            news_items = self.collector.collect_links(pending_links)
+            # The collector returns a Dict[str, NewsData]
+            results: Dict[str, NewsData] = self.collector.crawl_batch(pending_links)
             
-            if news_items:
-                logger.info(f"✅ Successfully crawled {len(news_items)} pages")
-                successful_links = [item.link for item in news_items]
-                self.total_processed += len(news_items)
+            if results:
+                logger.info(f"✅ Successfully crawled {len(results)} pages")
+                successful_links = list(results.keys())
+                self.total_processed += len(results)
+                
+                # Insert news data into database
+                news_items = list(results.values())
+                self.db_manager.insert_news_batch(news_items)
                 
                 # Mark successfully crawled links as COMPLETED
                 self.db_manager.mark_links_completed(successful_links)
@@ -174,6 +172,7 @@ class HistoricalPageScheduler:
             self.db_manager.increment_link_try_count(all_links)
             return False
         
+        self.batch_count += 1
         return True
     
     def log_statistics(self):
@@ -187,7 +186,12 @@ class HistoricalPageScheduler:
         logger.info(f"  Total Processed: {self.total_processed}")
         logger.info(f"  Total Failed: {self.total_failed}")
         logger.info(f"  Total Retries: {self.total_retries}")
-        logger.info(f"  Success Rate: {(self.total_processed / max(self.total_processed + self.total_failed, 1)) * 100:.1f}%")
+        
+        total_attempts = self.total_processed + self.total_failed
+        if total_attempts > 0:
+            success_rate = (self.total_processed / total_attempts) * 100
+            logger.info(f"  Success Rate: {success_rate:.1f}%")
+        
         logger.info(f"  Elapsed Time: {elapsed:.0f}s")
         logger.info(f"  Processing Rate: {rate:.2f} pages/sec")
         
@@ -197,7 +201,11 @@ class HistoricalPageScheduler:
             logger.info("-" * 80)
             logger.info("  Retry Distribution:")
             for tries, count in sorted(retry_stats['retry_distribution'].items()):
-                logger.info(f"    {tries} attempts: {count} links")
+                if tries >= self.max_retries:
+                    label = f"{tries}+ attempts"
+                else:
+                    label = f"{tries} attempts"
+                logger.info(f"    {label}: {count} links")
             logger.info(f"  Near Max Retries ({self.max_retries-1}+): {retry_stats['near_max_retries']}")
             
             # Get failed count
@@ -255,7 +263,7 @@ class HistoricalPageScheduler:
                 time.sleep(2)
                 
                 # Log stats every 10 batches
-                if self.total_processed % (self.batch_size * 10) < self.batch_size:
+                if self.batch_count % 10 == 0:
                     self.log_statistics()
         
         except KeyboardInterrupt:
