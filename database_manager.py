@@ -1,6 +1,6 @@
 import logging
-from datetime import timezone
-from typing import List
+from datetime import timezone, datetime
+from typing import List, Optional
 import time
 
 from sqlalchemy import create_engine, select, update
@@ -22,14 +22,24 @@ class DatabaseManager:
     - Connection pooling
     - Prepared statements
     - Source-filtered queries (optional)
+    - NEW: Retry tracking and max retry limit support
     
     Source Filtering:
     - Use get_pending_news_batch() to fetch from ALL sources (default)
     - Use get_pending_news_batch_by_source(source) to filter by specific source
     """
 
-    def __init__(self, db_config: DatabaseConfig):
+    def __init__(self, db_config: DatabaseConfig, max_retries: int = 3):
+        """
+        Initialize database manager.
+        
+        Args:
+            db_config: Database configuration
+            max_retries: Maximum number of retry attempts for a link (default: 3)
+        """
         self.db_config = db_config
+        self.max_retries = max_retries
+        
         self.db_url = (
             f"postgresql+psycopg://{db_config.user}:{db_config.password}"
             f"@{db_config.host}:{db_config.port}/{db_config.db}"
@@ -107,6 +117,183 @@ class DatabaseManager:
             return inserted_count
 
     # ----------------------------
+    # NEW: RETRY TRACKING METHODS
+    # ----------------------------
+    
+    def increment_link_try_count(self, links: List[str]) -> int:
+        """
+        Increment the tried_count for a list of links and update last_tried_at.
+        
+        This should be called when a link crawl attempt fails.
+        
+        Args:
+            links: List of link URLs that were attempted
+            
+        Returns:
+            Number of links updated
+        """
+        if not links:
+            return 0
+        
+        with Session(self.engine) as session:
+            stmt = (
+                update(NewsLink)
+                .where(NewsLink.link.in_(links))
+                .values(
+                    tried_count=NewsLink.tried_count + 1,
+                    last_tried_at=datetime.now(timezone.utc)
+                )
+            )
+            
+            result = session.execute(stmt)
+            session.commit()
+            
+            updated_count = result.rowcount
+            logger.info(f"Incremented try count for {updated_count} links")
+            
+            return updated_count
+    
+    def mark_links_as_failed(self, links: List[str]) -> int:
+        """
+        Mark links as FAILED when they exceed max retry attempts.
+        
+        Args:
+            links: List of link URLs to mark as failed
+            
+        Returns:
+            Number of links marked as failed
+        """
+        if not links:
+            return 0
+        
+        with Session(self.engine) as session:
+            stmt = (
+                update(NewsLink)
+                .where(NewsLink.link.in_(links))
+                .values(status=StatusEnum.FAILED)
+            )
+            
+            result = session.execute(stmt)
+            session.commit()
+            
+            updated_count = result.rowcount
+            logger.warning(f"Marked {updated_count} links as FAILED (exceeded max retries)")
+            
+            return updated_count
+    
+    def get_pending_links_by_source(
+        self, 
+        source: str, 
+        limit: int = 50,
+        exclude_max_retries: bool = True
+    ) -> List[NewsLinkData]:
+        """
+        Fetch pending links efficiently.
+        
+        Args:
+            source: News source to fetch from
+            limit: Maximum number of links to fetch
+            exclude_max_retries: If True, exclude links that reached max retries
+            
+        Returns:
+            List of NewsLinkData objects
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(NewsLink)
+                .where(NewsLink.source == source)
+                .where(NewsLink.status == StatusEnum.PENDING)
+            )
+            
+            # NEW: Optionally filter out links that have exceeded max retries
+            if exclude_max_retries:
+                stmt = stmt.where(NewsLink.tried_count < self.max_retries)
+            
+            stmt = (
+                stmt.order_by(NewsLink.published_datetime.asc())
+                .limit(limit)
+            )
+            
+            orm_links = session.scalars(stmt).all()
+            
+            return [
+                NewsLinkData(
+                    source=link.source,
+                    link=link.link,
+                    published_datetime=link.published_datetime,
+                )
+                for link in orm_links
+            ]
+    
+    def get_failed_links_count_by_source(self, source: str) -> int:
+        """
+        Get count of failed links for a specific source.
+        
+        Args:
+            source: News source name
+            
+        Returns:
+            Count of failed links
+        """
+        with Session(self.engine) as session:
+            from sqlalchemy import func
+            stmt = (
+                select(func.count())
+                .select_from(NewsLink)
+                .where(NewsLink.source == source)
+                .where(NewsLink.status == StatusEnum.FAILED)
+            )
+            count = session.scalar(stmt)
+            return count or 0
+    
+    def get_links_exceeding_retries(self, source: Optional[str] = None) -> List[str]:
+        """
+        Get links that have exceeded max retries but are still marked as PENDING.
+        These should be marked as FAILED.
+        
+        Args:
+            source: Optional source filter
+            
+        Returns:
+            List of link URLs that exceeded max retries
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(NewsLink.link)
+                .where(NewsLink.status == StatusEnum.PENDING)
+                .where(NewsLink.tried_count >= self.max_retries)
+            )
+            
+            if source:
+                stmt = stmt.where(NewsLink.source == source)
+            
+            links = session.scalars(stmt).all()
+            return list(links)
+    
+    def cleanup_exceeded_retries(self, source: Optional[str] = None) -> int:
+        """
+        Mark all links that exceeded max retries as FAILED.
+        
+        This is a maintenance operation that should be run periodically.
+        
+        Args:
+            source: Optional source filter
+            
+        Returns:
+            Number of links marked as failed
+        """
+        exceeded_links = self.get_links_exceeding_retries(source)
+        
+        if exceeded_links:
+            logger.info(
+                f"Found {len(exceeded_links)} links exceeding max retries "
+                f"({self.max_retries}). Marking as FAILED..."
+            )
+            return self.mark_links_as_failed(exceeded_links)
+        
+        return 0
+
+    # ----------------------------
     # OPTIMIZED BATCH MARK - Single UPDATE query
     # ----------------------------
     def mark_links_completed_optimized(self, links: List[str]) -> int:
@@ -141,38 +328,6 @@ class DatabaseManager:
             )
             
             return updated_count
-
-    # ----------------------------
-    # OPTIMIZED FETCH with LIMIT batching
-    # ----------------------------
-    def get_pending_links_by_source(
-        self, 
-        source: str, 
-        limit: int = 50
-    ) -> List[NewsLinkData]:
-        """
-        Fetch pending links efficiently.
-        Uses indexed query with LIMIT.
-        """
-        with Session(self.engine) as session:
-            stmt = (
-                select(NewsLink)
-                .where(NewsLink.source == source)
-                .where(NewsLink.status == StatusEnum.PENDING)
-                .order_by(NewsLink.published_datetime.asc())
-                .limit(limit)
-            )
-            
-            orm_links = session.scalars(stmt).all()
-            
-            return [
-                NewsLinkData(
-                    source=link.source,
-                    link=link.link,
-                    published_datetime=link.published_datetime,
-                )
-                for link in orm_links
-            ]
 
     # ----------------------------
     # BATCH STATUS CHECK (avoid fetching already processed)
@@ -216,6 +371,7 @@ class DatabaseManager:
                     'link': link_data.link,
                     'published_datetime': link_data.published_datetime.replace(tzinfo=timezone.utc),
                     'status': StatusEnum.PENDING,
+                    'tried_count': 0,  # NEW: Initialize with 0
                 }
                 for link_data in links
             ]
@@ -392,3 +548,64 @@ class DatabaseManager:
             result = session.execute(stmt)
             session.commit()
             return result.rowcount
+    
+    # ----------------------------
+    # NEW: STATISTICS METHODS
+    # ----------------------------
+    
+    def get_retry_statistics(self, source: Optional[str] = None) -> dict:
+        """
+        Get retry statistics for monitoring.
+        
+        Args:
+            source: Optional source filter
+            
+        Returns:
+            Dictionary with retry statistics
+        """
+        with Session(self.engine) as session:
+            from sqlalchemy import func
+            
+            # Build base query
+            base_stmt = select(NewsLink).where(NewsLink.status == StatusEnum.PENDING)
+            if source:
+                base_stmt = base_stmt.where(NewsLink.source == source)
+            
+            # Count by retry attempts
+            stmt = (
+                select(
+                    NewsLink.tried_count,
+                    func.count().label('count')
+                )
+                .select_from(NewsLink)
+                .where(NewsLink.status == StatusEnum.PENDING)
+            )
+            
+            if source:
+                stmt = stmt.where(NewsLink.source == source)
+            
+            stmt = stmt.group_by(NewsLink.tried_count).order_by(NewsLink.tried_count)
+            
+            results = session.execute(stmt).all()
+            
+            retry_distribution = {row.tried_count: row.count for row in results}
+            
+            # Count close to max retries
+            near_max_stmt = (
+                select(func.count())
+                .select_from(NewsLink)
+                .where(NewsLink.status == StatusEnum.PENDING)
+                .where(NewsLink.tried_count >= self.max_retries - 1)
+            )
+            
+            if source:
+                near_max_stmt = near_max_stmt.where(NewsLink.source == source)
+            
+            near_max_count = session.scalar(near_max_stmt) or 0
+            
+            return {
+                'retry_distribution': retry_distribution,
+                'near_max_retries': near_max_count,
+                'max_retries': self.max_retries,
+                'source': source or 'ALL'
+            }

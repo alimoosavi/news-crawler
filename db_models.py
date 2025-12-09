@@ -18,6 +18,7 @@ class Base(DeclarativeBase):
 class StatusEnum(str, enum.Enum):
     PENDING = "pending"
     COMPLETED = "completed"
+    FAILED = "failed"  # NEW: For links that exceeded max retries
 
 
 # --- Matches NewsLinkData ---
@@ -26,6 +27,10 @@ class NewsLink(Base):
     """
     Stores news link metadata.
     Mirrors NewsLinkData.
+    
+    NEW FIELDS:
+    - tried_count: Number of times the link was attempted to be crawled
+    - last_tried_at: Last time the link was attempted
     """
     __tablename__ = "news_links"
 
@@ -35,18 +40,45 @@ class NewsLink(Base):
     link: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
     published_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    # New field
+    # Status field
     status: Mapped[StatusEnum] = mapped_column(
         Enum(StatusEnum, name="news_link_status"),
         nullable=False,
         default=StatusEnum.PENDING,
     )
+    
+    # NEW: Retry tracking fields
+    tried_count: Mapped[int] = mapped_column(
+        Integer, 
+        nullable=False, 
+        default=0,
+        comment="Number of times the link was attempted to be crawled"
+    )
+    
+    last_tried_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), 
+        nullable=True,
+        comment="Last time the link was attempted"
+    )
 
     def __repr__(self) -> str:
         return (
             f"NewsLink(id={self.id!r}, link={self.link[:50]!r}, "
-            f"source={self.source!r}, status={self.status!r})"
+            f"source={self.source!r}, status={self.status!r}, "
+            f"tried_count={self.tried_count!r})"
         )
+    
+    def can_retry(self, max_retries: int = 3) -> bool:
+        """
+        Check if this link can be retried.
+        
+        Args:
+            max_retries: Maximum number of retry attempts allowed
+            
+        Returns:
+            True if the link hasn't exceeded max retries, False otherwise
+        """
+        return self.tried_count < max_retries
 
 
 # --- Matches NewsData ---
@@ -71,7 +103,7 @@ class NewsContent(Base):
     images: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # New field
+    # Status field
     status: Mapped[StatusEnum] = mapped_column(
         Enum(StatusEnum, name="news_content_status"),
         nullable=False,
