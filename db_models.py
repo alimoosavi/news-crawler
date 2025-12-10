@@ -40,9 +40,9 @@ class NewsLink(Base):
     link: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
     published_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    # Status field
+    # Status field - FIXED: Added values_callable
     status: Mapped[StatusEnum] = mapped_column(
-        Enum(StatusEnum, name="news_link_status"),
+        Enum(StatusEnum, name="news_link_status", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=StatusEnum.PENDING,
     )
@@ -103,9 +103,9 @@ class NewsContent(Base):
     images: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # Status field
+    # Status field - FIXED: Added values_callable
     status: Mapped[StatusEnum] = mapped_column(
-        Enum(StatusEnum, name="news_content_status"),
+        Enum(StatusEnum, name="news_content_status", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=StatusEnum.PENDING,
     )
