@@ -89,7 +89,7 @@ class SharghHistoricalLinksCollector:
         Returns:
             Full sitemap URL
         """
-        encoded_params = SharghDailyHistoricalLinksCollector._encode_date_params(date)
+        encoded_params = SharghHistoricalLinksCollector._encode_date_params(date)
         return f"https://www.sharghdaily.com/sitemap/{encoded_params}.xml"
 
     @staticmethod
