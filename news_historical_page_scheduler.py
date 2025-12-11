@@ -20,15 +20,18 @@ USAGE:
     
     # Custom configuration
     python news_historical_page_scheduler.py --source ISNA --parallel 3 --max-concurrent 10 --batch-size 50
+    
+    # Process Shargh articles
+    python news_historical_page_scheduler.py --source Shargh --parallel 3
 
 FEATURES:
-    ✓ Async collectors (5-10x faster than sync)
-    ✓ Parallel execution (linear scaling)
-    ✓ Automatic process management
-    ✓ Progress tracking with ETA
-    ✓ Retry tracking and failure handling
-    ✓ Comprehensive statistics
-    ✓ Process monitoring and control
+    ✅ Async collectors (5-10x faster than sync)
+    ✅ Parallel execution (linear scaling)
+    ✅ Automatic process management
+    ✅ Progress tracking with ETA
+    ✅ Retry tracking and failure handling
+    ✅ Comprehensive statistics
+    ✅ Process monitoring and control
 
 PERFORMANCE:
     Single instance (concurrent=5):  ~5-10 pages/sec  (3-6 hours for 117K)
@@ -50,9 +53,10 @@ from collectors.irna.pages_collector import IRNAPageCollector
 from collectors.tasnim.pages_collector import TasnimPageCollector
 from collectors.donyaye_eghtesad.pages_collector import DonyaEqtesadPageCollector
 from collectors.isna.pages_collector import ISNAPageCollector
+from collectors.shargh.pages_collector import SharghPageCollector
 from config import settings
 from database_manager import DatabaseManager
-from news_publishers import IRNA, TASNIM, ISNA, DONYAYE_EQTESAD
+from news_publishers import IRNA, TASNIM, ISNA, DONYAYE_EQTESAD, SHARGH
 from schema import NewsLinkData, NewsData
 
 logging.basicConfig(
@@ -66,7 +70,8 @@ HISTORICAL_PAGE_COLLECTORS = {
     IRNA: IRNAPageCollector,
     TASNIM: TasnimPageCollector,
     DONYAYE_EQTESAD: DonyaEqtesadPageCollector,
-    ISNA: ISNAPageCollector
+    ISNA: ISNAPageCollector,
+    SHARGH: SharghPageCollector
 }
 
 ALL_SOURCES = list(HISTORICAL_PAGE_COLLECTORS.keys())
@@ -113,7 +118,7 @@ class ProcessManager:
                 start_new_session=True
             )
         
-        logger.info(f"   ✓ Instance {instance_num} started (PID: {process.pid})")
+        logger.info(f"   ✅ Instance {instance_num} started (PID: {process.pid})")
         return process
     
     def start_parallel(
@@ -131,7 +136,7 @@ class ProcessManager:
         logger.info("=" * 80)
         
         for source in sources:
-            logger.info(f"\n📰 Starting {num_instances} instances for {source}")
+            logger.info(f"\n🔄 Starting {num_instances} instances for {source}")
             logger.info(f"   Batch Size: {batch_size}")
             logger.info(f"   Max Concurrent: {max_concurrent}")
             logger.info("")
@@ -157,7 +162,7 @@ class ProcessManager:
                 time.sleep(1)
         
         logger.info("\n" + "=" * 80)
-        logger.info(f"✓ Started {len(self.processes)} total instances")
+        logger.info(f"✅ Started {len(self.processes)} total instances")
         logger.info("=" * 80)
     
     def show_status(self):
@@ -192,7 +197,7 @@ class ProcessManager:
                 running = [p for p in self.processes if p['process'].poll() is None]
                 
                 if not running:
-                    logger.info("\n✓ All instances completed")
+                    logger.info("\n✅ All instances completed")
                     break
                 
                 # Show periodic status
@@ -210,15 +215,15 @@ class ProcessManager:
             if process.poll() is None:
                 try:
                     os.kill(process.pid, signal.SIGTERM)
-                    logger.info(f"   ✓ Stopped {proc_info['source']} instance {proc_info['instance']}")
+                    logger.info(f"   ✅ Stopped {proc_info['source']} instance {proc_info['instance']}")
                 except ProcessLookupError:
                     pass
         
-        logger.info("\n✓ All processes stopped")
+        logger.info("\n✅ All processes stopped")
     
     def show_logs_info(self, sources: List[str]):
         """Show information about log files"""
-        logger.info("\n📚 LOG FILES")
+        logger.info("\n📂 LOG FILES")
         logger.info("-" * 80)
         
         for source in sources:
@@ -250,7 +255,7 @@ class ProcessManager:
         ETA_SECONDS = total_pending / TOTAL_RATE if TOTAL_RATE > 0 else 0
         ETA_HOURS = ETA_SECONDS / 3600
         
-        logger.info("\n📈 ESTIMATED COMPLETION TIME")
+        logger.info("\n⏰ ESTIMATED COMPLETION TIME")
         logger.info("-" * 80)
         logger.info(f"  Total pending: ~{total_pending:,} articles")
         logger.info(f"  Processing rate: ~{TOTAL_RATE} pages/sec")
@@ -328,7 +333,7 @@ class HistoricalPageScheduler:
         if not pending_links:
             return False
         
-        logger.info(f"📰 Fetched {len(pending_links)} pending links for {self.source}")
+        logger.info(f"🔄 Fetched {len(pending_links)} pending links for {self.source}")
         
         # Count retry links
         retry_links = [
@@ -336,7 +341,7 @@ class HistoricalPageScheduler:
             if hasattr(link, 'tried_count') and link.tried_count > 0
         ]
         if retry_links:
-            logger.info(f"  🔄 {len(retry_links)} are retry attempts")
+            logger.info(f"  🔁 {len(retry_links)} are retry attempts")
             self.total_retries += len(retry_links)
         
         # Collect page content
@@ -374,7 +379,7 @@ class HistoricalPageScheduler:
                 exceeded = self.db_manager.get_links_exceeding_retries(source=self.source)
                 if exceeded:
                     logger.warning(
-                        f"⛔️ {len(exceeded)} links exceeded max retries "
+                        f"⚠️  {len(exceeded)} links exceeded max retries "
                         f"({self.max_retries}). Marking as FAILED..."
                     )
                     self.db_manager.mark_links_as_failed(exceeded)
@@ -438,7 +443,7 @@ class HistoricalPageScheduler:
         logger.info(f"  Avg Batch Time: {avg_batch_time:.1f}s")
         
         if pending_count > 0 and rate > 0:
-            logger.info(f"  📈 ETA for remaining: {eta_hours:.1f} hours")
+            logger.info(f"  ⏰ ETA for remaining: {eta_hours:.1f} hours")
         
         # Get retry statistics
         try:
@@ -539,6 +544,9 @@ Examples:
     # All sources in parallel
     python news_historical_page_scheduler.py --source ALL --parallel 3
     
+    # Process Shargh articles
+    python news_historical_page_scheduler.py --source Shargh --parallel 3
+    
     # High performance mode
     python news_historical_page_scheduler.py --source ISNA --parallel 5 --max-concurrent 10
     
@@ -556,7 +564,7 @@ Performance Guide:
         '--source',
         type=str,
         required=True,
-        choices=['IRNA', 'ISNA', 'Tasnim', 'Donya-e-Eqtesad', 'ALL'],
+        choices=['IRNA', 'ISNA', 'Tasnim', 'Donya-e-Eqtesad', 'Shargh', 'ALL'],
         help='News source to process (or ALL for all sources)'
     )
     
