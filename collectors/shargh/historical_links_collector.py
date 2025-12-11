@@ -42,8 +42,7 @@ class SharghHistoricalLinksCollector:
         self,
         db_manager: DatabaseManager,
         batch_size: int = 10,
-        workers: int = 4,
-        request_timeout: int = 30
+        workers: int = 4
     ):
         """
         Initialize Shargh historical collector.
@@ -52,12 +51,10 @@ class SharghHistoricalLinksCollector:
             db_manager: Database manager for persisting links
             batch_size: Number of days to process in parallel per batch
             workers: Number of parallel worker processes
-            request_timeout: HTTP request timeout in seconds
         """
         self.logger = logging.getLogger(self.__class__.__name__)
         self.batch_size = batch_size
         self.workers = workers
-        self.request_timeout = request_timeout
         self.db_manager = db_manager
 
     @staticmethod
@@ -202,7 +199,7 @@ class SharghHistoricalLinksCollector:
             return None
 
     @staticmethod
-    def _crawl_single_day(date: dt_date, timeout: int = 30) -> Tuple[str, List[NewsLinkData]]:
+    def _crawl_single_day(date: dt_date) -> Tuple[str, List[NewsLinkData]]:
         """
         Crawl a single day's sitemap and extract news links.
         
@@ -210,7 +207,6 @@ class SharghHistoricalLinksCollector:
         
         Args:
             date: Date to crawl
-            timeout: Request timeout in seconds
             
         Returns:
             Tuple of (date_string, list of NewsLinkData)
@@ -222,10 +218,10 @@ class SharghHistoricalLinksCollector:
             sitemap_url = SharghHistoricalLinksCollector._get_daily_sitemap_url(date)
             logger.info(f"📅 Fetching Shargh sitemap for {date}: {sitemap_url}")
             
-            # Fetch sitemap content
+            # Fetch sitemap content (use default timeout of 30)
             xml_content = SharghHistoricalLinksCollector._fetch_sitemap_content(
                 sitemap_url,
-                timeout
+                timeout=30
             )
             
             if not xml_content:
@@ -279,12 +275,7 @@ class SharghHistoricalLinksCollector:
 
             # Parallel crawl batch
             with mp.Pool(processes=self.workers) as pool:
-                # Pass timeout to each worker
-                crawl_func = lambda date: self._crawl_single_day(
-                    date,
-                    self.request_timeout
-                )
-                results = pool.map(crawl_func, batch_dates)
+                results = pool.map(self._crawl_single_day, batch_dates)
 
             # Persist results
             batch_total = 0
