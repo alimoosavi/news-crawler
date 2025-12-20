@@ -12,6 +12,7 @@ Key Features:
 - Compatible with Qdrant client v1.7+
 
 FIXED: Removed deprecated Batch() wrapper that caused ResponseHandlingException
+FIXED: Corrected embedding service initialization to pass individual parameters
 """
 import logging
 import uuid
@@ -52,6 +53,7 @@ class VectorDBManager:
     Supports concurrent embedding generation for improved performance.
     
     FIXED: Compatible with Qdrant client v1.7+ (removed deprecated Batch API)
+    FIXED: Corrected embedding service initialization
     """
 
     def __init__(
@@ -74,17 +76,21 @@ class VectorDBManager:
             grpc_port=qdrant_config.grpc_port,
             timeout=60,
             prefer_grpc=True,
-            check_compatibility=False  # ✅ FIX 1: Ignore version mismatch warning
+            check_compatibility=False  # Ignore version mismatch warning
         )
 
         # Create embedding service based on provider
         try:
-            # ✅ FIX 2: Check what your create_embedding_service expects
-            # Option A: If it takes (config, logger)
-            self.embedding_service = create_embedding_service(embedding_config, self.logger)
-            
-            # Option B: If it only takes (config)
-            # self.embedding_service = create_embedding_service(embedding_config)
+            self.embedding_service = create_embedding_service(
+                provider=embedding_config.provider,
+                logger=self.logger,
+                openai_api_key=embedding_config.openai_api_key,
+                openai_model=embedding_config.openai_model,
+                ollama_host=embedding_config.ollama_host,
+                ollama_model=embedding_config.ollama_model,
+                max_workers=embedding_config.max_concurrent_requests,
+                chunk_size=embedding_config.chunk_size
+            )
             
             # Get embedding dimension from the service
             self.embedding_dim = self.embedding_service.get_dimension()
