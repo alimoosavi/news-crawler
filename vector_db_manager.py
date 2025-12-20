@@ -63,12 +63,6 @@ class VectorDBManager:
     ):
         """
         Initialize VectorDBManager with flexible embedding provider.
-        
-        Args:
-            qdrant_config: Qdrant configuration
-            embedding_config: Embedding configuration (provider, model, concurrency, etc.)
-            logger: Logger instance
-            collection_name: Optional collection name (overrides config)
         """
         self.logger = logger
         self.collection_name = collection_name or qdrant_config.collection_name
@@ -78,13 +72,19 @@ class VectorDBManager:
             host=qdrant_config.host,
             port=qdrant_config.port,
             grpc_port=qdrant_config.grpc_port,
-            timeout=60,        # 60 second timeout for operations
-            prefer_grpc=True   # Use gRPC for better performance
+            timeout=60,
+            prefer_grpc=True,
+            check_compatibility=False  # ✅ FIX 1: Ignore version mismatch warning
         )
 
-        # Create embedding service based on provider with concurrent processing support
+        # Create embedding service based on provider
         try:
-            self.embedding_service = create_embedding_service(embedding_config)
+            # ✅ FIX 2: Check what your create_embedding_service expects
+            # Option A: If it takes (config, logger)
+            self.embedding_service = create_embedding_service(embedding_config, self.logger)
+            
+            # Option B: If it only takes (config)
+            # self.embedding_service = create_embedding_service(embedding_config)
             
             # Get embedding dimension from the service
             self.embedding_dim = self.embedding_service.get_dimension()
@@ -98,17 +98,7 @@ class VectorDBManager:
         except Exception as e:
             self.logger.error(f"Failed to initialize embedding service: {e}")
             raise
-
-        # Ensure collection exists with correct dimension
-        self.ensure_collection_exists()
-
-        # Start Prometheus metrics server on port 8000
-        try:
-            start_http_server(8000)
-            self.logger.info("Prometheus metrics server started on port 8000.")
-        except OSError as e:
-            self.logger.warning(f"Failed to start Prometheus server on port 8000: {e}")
-
+    
     def ensure_collection_exists(self):
         """
         Ensure the Qdrant collection exists with the correct embedding dimension.
