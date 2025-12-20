@@ -1,26 +1,21 @@
 """
-Vector Database Manager for newsLens - FIXED VERSION
+Vector Database Manager for newsLens
 
 Manages embeddings and Qdrant vector storage with support for multiple
 embedding providers (OpenAI, Ollama) with concurrent processing.
 
-Key Fixes:
-- Removed deprecated Batch() wrapper (causes ResponseHandlingException)
-- Added proper timeout configuration
-- Chunked large batch uploads to prevent timeouts
-- Improved error handling and logging
-- Better retry logic with exponential backoff
-
-Features:
+Key Features:
 - Auto-creates Qdrant collection on first run
 - Validates dimension compatibility (fails fast if model changed)
 - Batch embedding for performance with concurrent processing
 - Retry logic with exponential backoff
-- Chunked uploads for large batches
+- Compatible with Qdrant client v1.7+
+
+FIXED: Removed deprecated Batch() wrapper that caused ResponseHandlingException
 """
 import logging
 import uuid
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from datetime import datetime
 from dataclasses import asdict
 
@@ -45,11 +40,6 @@ QDRANT_UPSERT_LATENCY = Summary(
     'Latency of Qdrant upsert operations'
 )
 
-QDRANT_EMBEDDING_LATENCY = Summary(
-    'qdrant_embedding_latency_seconds',
-    'Latency of embedding generation'
-)
-
 
 class VectorDBManager:
     """
@@ -69,8 +59,7 @@ class VectorDBManager:
         qdrant_config: QdrantConfig,
         embedding_config: EmbeddingConfig,
         logger: logging.Logger,
-        collection_name: str = None,
-        chunk_size: int = 100
+        collection_name: str = None
     ):
         """
         Initialize VectorDBManager with flexible embedding provider.
@@ -80,27 +69,18 @@ class VectorDBManager:
             embedding_config: Embedding configuration (provider, model, concurrency, etc.)
             logger: Logger instance
             collection_name: Optional collection name (overrides config)
-            chunk_size: Maximum points to upsert in single batch (default: 100)
         """
         self.logger = logger
         self.collection_name = collection_name or qdrant_config.collection_name
-        self.chunk_size = chunk_size
 
-        # Initialize Qdrant client with proper timeouts
-        try:
-            self.qdrant_client = QdrantClient(
-                host=qdrant_config.host,
-                port=qdrant_config.port,
-                grpc_port=qdrant_config.grpc_port,
-                timeout=60,  # 60 second timeout for HTTP requests
-                prefer_grpc=True,  # Use gRPC for better performance with large batches
-            )
-            self.logger.info(
-                f"✅ Qdrant client initialized: {qdrant_config.host}:{qdrant_config.port}"
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Qdrant client: {e}")
-            raise
+        # Initialize Qdrant client with proper timeout settings
+        self.qdrant_client = QdrantClient(
+            host=qdrant_config.host,
+            port=qdrant_config.port,
+            grpc_port=qdrant_config.grpc_port,
+            timeout=60,        # 60 second timeout for operations
+            prefer_grpc=True   # Use gRPC for better performance
+        )
 
         # Create embedding service based on provider with concurrent processing support
         try:
@@ -111,7 +91,7 @@ class VectorDBManager:
             provider_name = self.embedding_service.get_provider_name()
             
             self.logger.info(
-                f"✅ Embedding service initialized: {provider_name} "
+                f"✅ VectorDBManager initialized with {provider_name} "
                 f"(dimension: {self.embedding_dim})"
             )
             
@@ -125,9 +105,9 @@ class VectorDBManager:
         # Start Prometheus metrics server on port 8000
         try:
             start_http_server(8000)
-            self.logger.info("✅ Prometheus metrics server started on port 8000")
+            self.logger.info("Prometheus metrics server started on port 8000.")
         except OSError as e:
-            self.logger.warning(f"Prometheus server already running or port occupied: {e}")
+            self.logger.warning(f"Failed to start Prometheus server on port 8000: {e}")
 
     def ensure_collection_exists(self):
         """
@@ -144,7 +124,6 @@ class VectorDBManager:
         try:
             if not self.qdrant_client.collection_exists(collection_name=self.collection_name):
                 # Create new collection
-                self.logger.info(f"Creating collection '{self.collection_name}'...")
                 self.qdrant_client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
@@ -180,7 +159,7 @@ class VectorDBManager:
                         f"Your options:\n"
                         f"  1. REVERT .env to original embedding settings (recommended)\n"
                         f"  2. DELETE collection and re-embed ALL articles:\n"
-                        f"     Delete collection in Qdrant UI or via API\n"
+                        f"     python delete_collection.py\n"
                         f"     (This deletes all {collection_info.points_count:,} embeddings!)\n"
                         f"     Then re-run: python news_historical_embedding_scheduler.py\n\n"
                         f"Details:\n"
@@ -208,11 +187,7 @@ class VectorDBManager:
             raise
 
     def extract_plain_text(self, news: NewsData) -> str:
-        """
-        Extract plain string text from a NewsData object for embedding.
-        
-        Priority: title + summary > content
-        """
+        """Extract plain string text from a NewsData object for embedding."""
         title = str(news.title or "")
         summary = str(news.summary or "")
         content = str(news.content or "")
@@ -225,7 +200,6 @@ class VectorDBManager:
         return str(text).replace("\n", " ").strip()
 
     @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
-    @QDRANT_EMBEDDING_LATENCY.time()
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings for a batch of texts using the configured provider.
@@ -238,10 +212,6 @@ class VectorDBManager:
             
         Returns:
             List of embedding vectors
-            
-        Raises:
-            ValueError: If embedding dimension doesn't match expected
-            Exception: On embedding generation failure
         """
         if not texts:
             return []
@@ -254,15 +224,14 @@ class VectorDBManager:
             vectors = self.embedding_service.embed_documents(non_empty_texts)
 
             # Validate dimensions
-            for idx, vector in enumerate(vectors):
+            for vector in vectors:
                 if len(vector) != self.embedding_dim:
                     raise ValueError(
                         f"Expected embedding dimension {self.embedding_dim}, "
-                        f"got {len(vector)} at index {idx}"
+                        f"got {len(vector)} in batch."
                     )
 
             return vectors
-            
         except Exception as e:
             self.logger.error(f"Batch embedding generation failed: {e}")
             raise
@@ -273,38 +242,17 @@ class VectorDBManager:
         """
         Upsert a list of points into Qdrant in a single batch operation.
         
-        FIXED: Removed deprecated Batch() wrapper that caused ResponseHandlingException
-        in Qdrant client v1.7+
-        
-        Args:
-            points: List of PointStruct objects to upsert
-            
-        Raises:
-            Exception: On upsert failure after retries
+        FIXED: Removed deprecated Batch() wrapper - now passes points directly
         """
-        try:
-            # Direct upsert without Batch() wrapper (compatible with v1.7+)
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name,
-                points=points,  # Pass points directly as list
-                wait=True  # Wait for indexing to complete
-            )
-            
-            self.logger.debug(f"✅ Successfully upserted {len(points)} points to Qdrant")
-            
-        except Exception as e:
-            self.logger.error(
-                f"Upsert failed: {type(e).__name__}: {e}\n"
-                f"Collection: {self.collection_name}, Points: {len(points)}"
-            )
-            raise
+        self.qdrant_client.upsert(
+            collection_name=self.collection_name,
+            points=points,  # Direct list - no Batch wrapper
+            wait=True
+        )
 
     def persist_news_batch(self, news_batch: List[NewsData]) -> int:
         """
         Persist a batch of NewsData objects into Qdrant.
-        
-        IMPROVED: Now chunks large batches to prevent timeouts on collections
-        with many existing vectors (e.g., 471K+).
         
         Args:
             news_batch: List of NewsData objects to embed and store
@@ -327,19 +275,13 @@ class VectorDBManager:
                 articles_to_embed.append((news, point_id, embedding_text))
                 texts_for_embedding.append(embedding_text)
             else:
-                self.logger.warning(
-                    f"Skipping article with link '{news.link}' due to empty content"
-                )
+                self.logger.warning(f"Skipping article with link '{news.link}' due to empty content.")
 
         if not articles_to_embed:
-            self.logger.warning("No valid articles to embed in batch")
             return 0
 
         # 2. Get embeddings in a single batch with concurrent processing
-        self.logger.info(
-            f"Generating embeddings for batch of {len(texts_for_embedding)} articles"
-        )
-        
+        self.logger.info(f"Generating embeddings for batch of {len(texts_for_embedding)} articles.")
         vectors: List[List[float]] = []
         try:
             vectors = self.get_embeddings_batch(texts_for_embedding)
@@ -347,16 +289,10 @@ class VectorDBManager:
             self.logger.error(f"Failed to get embeddings for batch: {e}")
             return 0
 
-        if len(vectors) != len(articles_to_embed):
-            self.logger.error(
-                f"Vector count mismatch: got {len(vectors)}, expected {len(articles_to_embed)}"
-            )
-            return 0
-
         # 3. Construct Points
         points: List[PointStruct] = []
-        
         for i, (news, point_id, _) in enumerate(articles_to_embed):
+
             # Convert dataclass to dict
             payload = asdict(news)
 
@@ -369,124 +305,22 @@ class VectorDBManager:
                 payload['published_timestamp'] = str(payload['published_timestamp'])
 
             try:
-                point = PointStruct(
-                    id=point_id,
-                    vector=vectors[i],
-                    payload=payload
-                )
+                point = PointStruct(id=point_id, vector=vectors[i], payload=payload)
                 points.append(point)
-                
             except IndexError:
-                self.logger.error(
-                    f"Vector missing for article {news.link} at index {i} "
-                    f"during point construction"
-                )
-                continue
+                self.logger.error(f"Vector missing for article {news.link} during point construction.")
 
         if not points:
-            self.logger.warning("No valid points constructed from batch")
             return 0
 
-        # 4. Upsert Points in chunks to avoid timeouts
-        total_inserted = 0
-        num_chunks = (len(points) - 1) // self.chunk_size + 1
-        
-        self.logger.info(
-            f"Upserting {len(points)} points in {num_chunks} chunk(s) "
-            f"(chunk_size={self.chunk_size})"
-        )
-        
-        for i in range(0, len(points), self.chunk_size):
-            chunk = points[i:i + self.chunk_size]
-            chunk_num = i // self.chunk_size + 1
-            
-            try:
-                self.logger.info(
-                    f"Upserting chunk {chunk_num}/{num_chunks} ({len(chunk)} points) "
-                    f"to Qdrant..."
-                )
-                
-                self._upsert_points_with_retry(chunk)
-                total_inserted += len(chunk)
-                
-                self.logger.info(
-                    f"✅ Chunk {chunk_num}/{num_chunks} inserted successfully "
-                    f"({total_inserted}/{len(points)} total)"
-                )
-                
-            except RetryError as e:
-                self.logger.critical(
-                    f"❌ Chunk {chunk_num}/{num_chunks} failed after all retries: "
-                    f"{e.last_attempt.exception()}"
-                )
-                # Continue with next chunk instead of failing entire batch
-                continue
-                
-            except Exception as e:
-                self.logger.error(
-                    f"❌ Unexpected error during chunk {chunk_num}/{num_chunks} upsert: {e}"
-                )
-                # Continue with next chunk
-                continue
-        
-        # 5. Log final results
-        if total_inserted < len(points):
-            self.logger.warning(
-                f"⚠️  Partial success: {total_inserted}/{len(points)} points inserted"
-            )
-        else:
-            self.logger.info(
-                f"✅ All {total_inserted} points inserted successfully"
-            )
-        
-        return total_inserted
-
-    def get_collection_stats(self) -> dict:
-        """
-        Get statistics about the current collection.
-        
-        Returns:
-            Dictionary with collection statistics
-        """
+        # 4. Upsert Points in a single batch
         try:
-            collection_info = self.qdrant_client.get_collection(self.collection_name)
-            
-            return {
-                'collection_name': self.collection_name,
-                'points_count': collection_info.points_count,
-                'segments_count': collection_info.segments_count,
-                'vectors_count': collection_info.vectors_count,
-                'indexed_vectors_count': collection_info.indexed_vectors_count,
-                'status': collection_info.status,
-                'dimension': collection_info.config.params.vectors.size,
-                'distance': collection_info.config.params.vectors.distance,
-            }
-            
+            self.logger.info(f"Upserting batch of {len(points)} points to Qdrant.")
+            self._upsert_points_with_retry(points)
+            return len(points)
+        except RetryError as e:
+            self.logger.critical(f"Failed to upsert batch after retries: {e.last_attempt.exception()}")
+            return 0
         except Exception as e:
-            self.logger.error(f"Failed to get collection stats: {e}")
-            return {}
-
-    def health_check(self) -> bool:
-        """
-        Check if Qdrant is healthy and collection is accessible.
-        
-        Returns:
-            True if healthy, False otherwise
-        """
-        try:
-            # Check if collection exists
-            exists = self.qdrant_client.collection_exists(self.collection_name)
-            
-            if not exists:
-                self.logger.error(f"Collection '{self.collection_name}' does not exist")
-                return False
-            
-            # Try to get collection info
-            self.qdrant_client.get_collection(self.collection_name)
-            
-            self.logger.info(f"✅ Health check passed for collection '{self.collection_name}'")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Health check failed: {e}")
-            return False
+            self.logger.error(f"Unexpected error during Qdrant upsert: {e}")
+            return 0
