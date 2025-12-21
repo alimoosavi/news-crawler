@@ -25,3 +25,5 @@ last_links_cache.json
 .DS_Store
 
 resources/
+
+*.sql

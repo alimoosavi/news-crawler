@@ -117,24 +117,17 @@ class EmbeddingConfig(BaseSettings):
     Providers:
     - 'openai': Use OpenAI API (requires OPENAI_API_KEY)
     - 'ollama': Use local Ollama models (requires Ollama running)
+    - 'rayen': Use Rayen AI (Custom OpenAI-compatible API)
     
     Performance Settings:
     - max_concurrent_requests: Controls parallelism (higher = faster but more CPU)
     - chunk_size: Batch size for processing (affects memory usage)
-    
-    Model dimensions:
-    - text-embedding-3-small: 1536
-    - text-embedding-3-large: 3072
-    - bge-m3: 1024
-    - mxbai-embed-large: 1024
-    - multilingual-e5-base: 768
-    - multilingual-e5-large: 1024
     """
     
     # Provider selection
     provider: str = Field(
         default="openai",
-        description="Embedding provider: 'openai' or 'ollama'"
+        description="Embedding provider: 'openai', 'ollama', or 'rayen'"
     )
     
     # OpenAI settings
@@ -151,10 +144,21 @@ class EmbeddingConfig(BaseSettings):
     )
     ollama_model: str = Field(
         default="bge-m3",
-        description="Ollama model name (bge-m3, multilingual-e5-base, etc.)"
+        description="Ollama model name"
+    )
+
+    # Rayen AI settings (NEW)
+    rayen_api_key: str = Field(default="", description="Rayen AI API key")
+    rayen_base_url: str = Field(
+        default="https://gw.rayenai.ir/v1", 
+        description="Rayen AI Base URL"
+    )
+    rayen_model: str = Field(
+        default="rayen-bert",
+        description="Rayen AI model name"
     )
     
-    # Concurrent processing settings (NEW)
+    # Concurrent processing settings
     max_concurrent_requests: int = Field(
         default=10,
         description="Maximum concurrent embedding requests (for parallel processing)"
@@ -172,6 +176,8 @@ class EmbeddingConfig(BaseSettings):
             return self._get_openai_dimension()
         elif self.provider == "ollama":
             return self._get_ollama_dimension()
+        elif self.provider == "rayen":
+            return self._get_rayen_dimension()
         else:
             raise ValueError(f"Unknown embedding provider: {self.provider}")
     
@@ -194,17 +200,21 @@ class EmbeddingConfig(BaseSettings):
             "mxbai-embed-large": 1024,
             "all-minilm": 384,
         }
-        # Try exact match first
         if self.ollama_model in ollama_dims:
             return ollama_dims[self.ollama_model]
         
-        # Try partial match (for community models like zylonai/multilingual-e5-large)
         for model_key, dim in ollama_dims.items():
             if model_key in self.ollama_model:
                 return dim
         
-        # Default fallback
         return 1024
+
+    def _get_rayen_dimension(self) -> int:
+        """Get Rayen model embedding dimension"""
+        rayen_dims = {
+            "rayen-bert": 768,
+        }
+        return rayen_dims.get(self.rayen_model, 768)
 
     class Config:
         env_prefix = "EMBEDDING_"
@@ -300,7 +310,7 @@ class Settings(BaseSettings):
     redpanda_console: RedpandaConsoleConfig = RedpandaConsoleConfig()
     redis: RedisConfig = RedisConfig()
     qdrant: QdrantConfig = QdrantConfig()
-    embedding: EmbeddingConfig = EmbeddingConfig()  # Unified embedding config
+    embedding: EmbeddingConfig = EmbeddingConfig()
     openai: OpenAIConfig = OpenAIConfig()  # Legacy support
     spark: SparkConfig = SparkConfig()
     huggingface: HuggingFaceConfig = HuggingFaceConfig()

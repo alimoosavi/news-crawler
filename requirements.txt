@@ -64,3 +64,5 @@ matplotlib
 
 # Ollama embedding provider (install if using Ollama)
 ollama==0.1.6
+
+ipykernel>=6.29.0

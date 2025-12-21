@@ -3,7 +3,7 @@
 Historical Embedding Scheduler with Optional Source Filtering
 
 Processes historical news from PostgreSQL database and generates embeddings.
-Uses embedding provider configured in .env (OpenAI or Ollama).
+Uses embedding provider configured in .env (OpenAI, Ollama, or Rayen).
 
 DEFAULT BEHAVIOR (no --source):
     Processes ALL news sources together in a single scheduler.
@@ -132,6 +132,9 @@ class EmbeddingScheduler:
         
         if settings.embedding.provider == 'openai':
             logger.info(f"Model: {settings.embedding.openai_model}")
+        elif settings.embedding.provider == 'rayen':
+            logger.info(f"Model: {settings.embedding.rayen_model}")
+            logger.info(f"Base URL: {settings.embedding.rayen_base_url}")
         else:
             logger.info(f"Model: {settings.embedding.ollama_model}")
             

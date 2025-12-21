@@ -1,20 +1,28 @@
 """
 Optimized Abstract Embedding Service with Concurrent Processing
-Supports: OpenAI API, Ollama (local models) with parallel batch processing
+Supports:
+1. OpenAI API (Official)
+2. Ollama (Local models)
+3. Rayen AI (Custom OpenAI-compatible API)
+
+Includes:
+- Batch processing optimization
+- Parallel execution for local models
+- Prometheus metrics for monitoring
 """
 import logging
-from abc import ABC, abstractmethod
-from typing import List
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List
 
 from prometheus_client import Summary, Histogram
 
 # Metrics
 EMBEDDING_LATENCY = Summary(
-    'embedding_generation_latency_seconds', 
-    'Latency of embedding generation', 
+    'embedding_generation_latency_seconds',
+    'Latency of embedding generation',
     ['provider']
 )
 EMBEDDING_BATCH_SIZE = Histogram(
@@ -33,30 +41,30 @@ CONCURRENT_REQUESTS = Histogram(
 
 class EmbeddingService(ABC):
     """Abstract base class for embedding services"""
-    
+
     def __init__(self, logger: logging.Logger, max_workers: int = 10, chunk_size: int = 5):
         self.logger = logger
         self.max_workers = max_workers
         self.chunk_size = chunk_size
-    
+
     @abstractmethod
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings for a batch of texts.
-        
+
         Args:
             texts: List of text strings to embed
-            
+
         Returns:
             List of embedding vectors
         """
         pass
-    
+
     @abstractmethod
     def get_dimension(self) -> int:
         """Return the embedding dimension for this provider"""
         pass
-    
+
     @abstractmethod
     def get_provider_name(self) -> str:
         """Return the provider name for logging/metrics"""
@@ -65,42 +73,41 @@ class EmbeddingService(ABC):
 
 class OpenAIEmbeddingService(EmbeddingService):
     """OpenAI API-based embedding service with batch optimization"""
-    
+
     def __init__(
-        self, 
-        api_key: str, 
-        model_name: str, 
+        self,
+        api_key: str,
+        model_name: str,
         logger: logging.Logger,
         max_workers: int = 10,
         chunk_size: int = 5
     ):
         super().__init__(logger, max_workers, chunk_size)
-        
+
         if not api_key:
             raise ValueError("OpenAI API key is required for OpenAIEmbeddingService")
-        
+
         # Set environment variable for LangChain
         os.environ['OPENAI_API_KEY'] = api_key
-        
-        # Import here to avoid dependency if not using OpenAI
+
         try:
             from langchain_openai import OpenAIEmbeddings
         except ImportError:
             raise ImportError(
                 "langchain-openai not installed. Run: pip install langchain-openai"
             )
-        
+
         self.model_name = model_name
         self.embeddings = OpenAIEmbeddings(model=model_name)
-        
+
         # Determine dimension
         self.dimension = self._get_dimension_from_model()
-        
+
         self.logger.info(
             f"✅ OpenAI Embedding Service initialized: model={model_name}, "
             f"dim={self.dimension}, max_workers={max_workers}"
         )
-    
+
     def _get_dimension_from_model(self) -> int:
         """Get embedding dimension based on OpenAI model name"""
         dims = {
@@ -109,62 +116,151 @@ class OpenAIEmbeddingService(EmbeddingService):
             "text-embedding-ada-002": 1536,
         }
         return dims.get(self.model_name, 1536)
-    
+
     @EMBEDDING_LATENCY.labels(provider='openai').time()
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings using OpenAI API with batch processing.
-        OpenAI API supports batch requests natively, so we use that.
+        OpenAI API supports batch requests natively.
         """
         if not texts:
             return []
-        
+
         # Filter out empty strings
         non_empty_texts = [text for text in texts if text.strip()]
         if not non_empty_texts:
             return []
-        
+
         EMBEDDING_BATCH_SIZE.labels(provider='openai').observe(len(non_empty_texts))
-        
+
         try:
             # OpenAI API handles batching efficiently internally
             vectors = self.embeddings.embed_documents(non_empty_texts)
-            
+
             # Validate dimensions
             for vector in vectors:
                 if len(vector) != self.dimension:
                     raise ValueError(
                         f"Expected dimension {self.dimension}, got {len(vector)}"
                     )
-            
+
             return vectors
         except Exception as e:
             self.logger.error(f"OpenAI embedding generation failed: {e}")
             raise
-    
+
     def get_dimension(self) -> int:
         return self.dimension
-    
+
     def get_provider_name(self) -> str:
         return f"openai-{self.model_name}"
 
 
-class OllamaEmbeddingService(EmbeddingService):
-    """Ollama local model embedding service with concurrent processing"""
-    
+class RayenEmbeddingService(EmbeddingService):
+    """
+    Rayen AI embedding service.
+    Uses OpenAI-compatible API protocol but points to Rayen's custom infrastructure.
+    """
+
     def __init__(
-        self, 
-        host: str, 
-        model_name: str, 
+        self,
+        api_key: str,
+        base_url: str,
+        model_name: str,
         logger: logging.Logger,
         max_workers: int = 10,
         chunk_size: int = 5
     ):
         super().__init__(logger, max_workers, chunk_size)
-        
+
+        if not api_key:
+            raise ValueError("Rayen API key is required")
+        if not base_url:
+            raise ValueError("Rayen Base URL is required")
+
+        # Reuse LangChain's OpenAI client because Rayen API is compatible
+        try:
+            from langchain_openai import OpenAIEmbeddings
+        except ImportError:
+            raise ImportError(
+                "langchain-openai not installed. Run: pip install langchain-openai"
+            )
+
+        self.model_name = model_name
+
+        # Initialize client pointing to custom Rayen URL
+        self.embeddings = OpenAIEmbeddings(
+            model=model_name,
+            openai_api_key=api_key,
+            openai_api_base=base_url,  # Points to https://gw.rayenai.ir/v1
+            check_embedding_ctx_length=False  # Custom models might not report context length standardly
+        )
+
+        # Standard BERT dimension (typically 768)
+        self.dimension = 768
+
+        self.logger.info(
+            f"✅ Rayen AI Embedding Service initialized: "
+            f"URL={base_url}, model={model_name}, dim={self.dimension}"
+        )
+
+    @EMBEDDING_LATENCY.labels(provider='rayen').time()
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings using Rayen API.
+        """
+        if not texts:
+            return []
+
+        non_empty_texts = [text for text in texts if text.strip()]
+        if not non_empty_texts:
+            return []
+
+        EMBEDDING_BATCH_SIZE.labels(provider='rayen').observe(len(non_empty_texts))
+
+        try:
+            # The API supports batching, so we send the list directly
+            vectors = self.embeddings.embed_documents(non_empty_texts)
+
+            # Dynamic dimension check (on first successful batch)
+            # This handles cases where the model dimension might not be exactly 768
+            if vectors and len(vectors) > 0:
+                actual_dim = len(vectors[0])
+                if actual_dim != self.dimension:
+                    self.logger.warning(
+                        f"Rayen dimension mismatch. Expected {self.dimension}, got {actual_dim}. "
+                        "Updating internal dimension."
+                    )
+                    self.dimension = actual_dim
+
+            return vectors
+        except Exception as e:
+            self.logger.error(f"Rayen embedding generation failed: {e}")
+            raise
+
+    def get_dimension(self) -> int:
+        return self.dimension
+
+    def get_provider_name(self) -> str:
+        return f"rayen-{self.model_name}"
+
+
+class OllamaEmbeddingService(EmbeddingService):
+    """Ollama local model embedding service with concurrent processing"""
+
+    def __init__(
+        self,
+        host: str,
+        model_name: str,
+        logger: logging.Logger,
+        max_workers: int = 10,
+        chunk_size: int = 5
+    ):
+        super().__init__(logger, max_workers, chunk_size)
+
         self.host = host
         self.model_name = model_name
-        
+
         # Import ollama library
         try:
             import ollama
@@ -173,7 +269,7 @@ class OllamaEmbeddingService(EmbeddingService):
             raise ImportError(
                 "ollama library not installed. Run: pip install ollama"
             )
-        
+
         # Verify Ollama is running
         try:
             self.ollama.list()
@@ -183,30 +279,30 @@ class OllamaEmbeddingService(EmbeddingService):
                 f"Cannot connect to Ollama at {host}. "
                 f"Ensure Ollama is running: ollama serve\nError: {e}"
             )
-        
+
         # Verify model exists
         self._ensure_model_exists()
-        
+
         # Determine dimension by making a test embedding
         self.dimension = self._detect_dimension()
-        
+
         self.logger.info(
             f"✅ Ollama Embedding Service initialized: model={model_name}, "
             f"dim={self.dimension}, max_workers={max_workers}, chunk_size={chunk_size}"
         )
-    
+
     def _ensure_model_exists(self):
         """Check if model exists, pull if not"""
         try:
             models = self.ollama.list()
             model_names = [m['name'] for m in models.get('models', [])]
-            
+
             # Check if our model is in the list
             model_exists = any(
                 self.model_name in name or name.startswith(self.model_name)
                 for name in model_names
             )
-            
+
             if not model_exists:
                 self.logger.warning(
                     f"⚠️  Model {self.model_name} not found. Pulling..."
@@ -215,7 +311,7 @@ class OllamaEmbeddingService(EmbeddingService):
                 self.logger.info(f"✅ Model {self.model_name} downloaded")
         except Exception as e:
             raise RuntimeError(f"Error checking/pulling Ollama model: {e}")
-    
+
     def _detect_dimension(self) -> int:
         """Detect embedding dimension by generating a test embedding"""
         try:
@@ -241,7 +337,7 @@ class OllamaEmbeddingService(EmbeddingService):
                 if model_key in self.model_name:
                     return dim
             return 1024  # Default fallback
-    
+
     def _embed_single(self, text: str) -> List[float]:
         """Generate embedding for a single text"""
         try:
@@ -250,42 +346,42 @@ class OllamaEmbeddingService(EmbeddingService):
                 prompt=text
             )
             embedding = response['embedding']
-            
+
             # Validate dimension
             if len(embedding) != self.dimension:
                 raise ValueError(
                     f"Expected dimension {self.dimension}, got {len(embedding)}"
                 )
-            
+
             return embedding
         except Exception as e:
             self.logger.error(f"Failed to embed text: {e}")
             raise
-    
+
     @EMBEDDING_LATENCY.labels(provider='ollama').time()
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings using Ollama with concurrent processing.
-        
+
         This method splits the texts into chunks and processes them
         concurrently using ThreadPoolExecutor for significant speedup.
         """
         if not texts:
             return []
-        
+
         # Filter out empty strings
         non_empty_texts = [text for text in texts if text.strip()]
         if not non_empty_texts:
             return []
-        
+
         EMBEDDING_BATCH_SIZE.labels(provider='ollama').observe(len(non_empty_texts))
-        
+
         start_time = time.time()
-        
+
         # Create a mapping to preserve order
         text_to_index = {i: text for i, text in enumerate(non_empty_texts)}
         embeddings = [None] * len(non_empty_texts)
-        
+
         # Use ThreadPoolExecutor for concurrent processing
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Submit all tasks
@@ -293,9 +389,9 @@ class OllamaEmbeddingService(EmbeddingService):
                 executor.submit(self._embed_single, text): idx
                 for idx, text in text_to_index.items()
             }
-            
+
             CONCURRENT_REQUESTS.labels(provider='ollama').observe(len(future_to_index))
-            
+
             # Collect results as they complete
             completed = 0
             for future in as_completed(future_to_index):
@@ -304,7 +400,7 @@ class OllamaEmbeddingService(EmbeddingService):
                     embedding = future.result()
                     embeddings[idx] = embedding
                     completed += 1
-                    
+
                     # Log progress for large batches
                     if completed % 10 == 0 or completed == len(non_empty_texts):
                         elapsed = time.time() - start_time
@@ -316,19 +412,19 @@ class OllamaEmbeddingService(EmbeddingService):
                 except Exception as e:
                     self.logger.error(f"Failed to get embedding for index {idx}: {e}")
                     raise
-        
+
         elapsed = time.time() - start_time
         rate = len(non_empty_texts) / elapsed if elapsed > 0 else 0
         self.logger.info(
             f"✅ Generated {len(non_empty_texts)} embeddings in {elapsed:.2f}s "
             f"({rate:.1f} emb/s)"
         )
-        
+
         return embeddings
-    
+
     def get_dimension(self) -> int:
         return self.dimension
-    
+
     def get_provider_name(self) -> str:
         return f"ollama-{self.model_name}"
 
@@ -342,55 +438,74 @@ def create_embedding_service(
     # Ollama params
     ollama_host: str = None,
     ollama_model: str = None,
+    # Rayen params
+    rayen_api_key: str = None,
+    rayen_base_url: str = None,
+    rayen_model: str = None,
     # Concurrency params
     max_workers: int = 10,
     chunk_size: int = 5,
 ) -> EmbeddingService:
     """
     Factory function to create the appropriate embedding service.
-    
+
     Args:
-        provider: 'openai' or 'ollama'
+        provider: 'openai', 'ollama', or 'rayen'
         logger: Logger instance
         openai_api_key: OpenAI API key (if provider='openai')
         openai_model: OpenAI model name (if provider='openai')
         ollama_host: Ollama host URL (if provider='ollama')
         ollama_model: Ollama model name (if provider='ollama')
+        rayen_api_key: Rayen API key (if provider='rayen')
+        rayen_base_url: Rayen Base URL (if provider='rayen')
+        rayen_model: Rayen model name (if provider='rayen')
         max_workers: Maximum concurrent workers for parallel processing
         chunk_size: Number of texts per chunk (currently unused, for future optimization)
-    
+
     Returns:
         EmbeddingService instance
-    
+
     Raises:
         ValueError: If provider is unknown or required params are missing
     """
     provider = provider.lower()
-    
+
     if provider == "openai":
         if not openai_api_key or not openai_model:
             raise ValueError("OpenAI provider requires api_key and model_name")
         return OpenAIEmbeddingService(
-            openai_api_key, 
-            openai_model, 
+            openai_api_key,
+            openai_model,
             logger,
             max_workers=max_workers,
             chunk_size=chunk_size
         )
-    
+
     elif provider == "ollama":
         if not ollama_host or not ollama_model:
             raise ValueError("Ollama provider requires host and model_name")
         return OllamaEmbeddingService(
-            ollama_host, 
-            ollama_model, 
+            ollama_host,
+            ollama_model,
             logger,
             max_workers=max_workers,
             chunk_size=chunk_size
         )
-    
+
+    elif provider == "rayen":
+        if not rayen_api_key or not rayen_base_url or not rayen_model:
+            raise ValueError("Rayen provider requires api_key, base_url, and model_name")
+        return RayenEmbeddingService(
+            api_key=rayen_api_key,
+            base_url=rayen_base_url,
+            model_name=rayen_model,
+            logger=logger,
+            max_workers=max_workers,
+            chunk_size=chunk_size
+        )
+
     else:
         raise ValueError(
             f"Unknown embedding provider: {provider}. "
-            f"Supported providers: 'openai', 'ollama'"
+            f"Supported providers: 'openai', 'ollama', 'rayen'"
         )
