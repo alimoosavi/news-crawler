@@ -27,3 +27,5 @@ last_links_cache.json
 resources/
 
 *.sql
+
+debug_data/*

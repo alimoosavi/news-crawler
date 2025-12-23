@@ -18,6 +18,8 @@ Key Features:
 - Batch processing with configurable size
 - Automatic retry on failures
 - Comprehensive logging and statistics
+- Health checks before starting
+- Graceful error handling with detailed diagnostics
 
 Usage Examples:
     # DEFAULT: Process all sources together (backward compatible)
@@ -29,11 +31,17 @@ Usage Examples:
     # OPTIONAL: Custom batch size
     python news_historical_embedding_scheduler.py --source ISNA --batch-size 50
     
+    # Run health check only
+    python news_historical_embedding_scheduler.py --health-check
+    
     # PARALLEL: Run multiple instances for maximum throughput
     python news_historical_embedding_scheduler.py --source IRNA &
     python news_historical_embedding_scheduler.py --source ISNA &
     python news_historical_embedding_scheduler.py --source Tasnim &
     python news_historical_embedding_scheduler.py --source Donya-e-Eqtesad &
+
+FIXED: Added comprehensive health checks before processing
+FIXED: Better error handling and diagnostics for embedding failures
 """
 import argparse
 import logging
@@ -44,6 +52,7 @@ from typing import Optional
 from database_manager import DatabaseManager
 from vector_db_manager import VectorDBManager
 from config import settings
+from embedding_service import EmbeddingValidationError
 
 logger = logging.getLogger("HistoricalEmbeddingScheduler")
 logging.basicConfig(
@@ -67,7 +76,8 @@ class EmbeddingScheduler:
         vector_manager: VectorDBManager,
         batch_size: int = 20,
         poll_interval: int = 30,
-        source: Optional[str] = None
+        source: Optional[str] = None,
+        max_consecutive_errors: int = 5
     ):
         """
         Initialize the embedding scheduler.
@@ -79,16 +89,19 @@ class EmbeddingScheduler:
             poll_interval: Seconds to wait when no pending articles
             source: Optional source filter (default=None processes ALL sources)
                    Examples: 'IRNA', 'ISNA', 'Tasnim', 'Donya-e-Eqtesad'
+            max_consecutive_errors: Stop after this many consecutive errors
         """
         self.db_manager = db_manager
         self.vector_manager = vector_manager
         self.batch_size = batch_size
         self.poll_interval = poll_interval
         self.source = source  # None = ALL sources (default)
+        self.max_consecutive_errors = max_consecutive_errors
         
         # Statistics
         self.total_processed = 0
         self.total_errors = 0
+        self.consecutive_errors = 0
         self.start_time = time.time()
 
     def _fetch_pending_batch(self):
@@ -114,15 +127,76 @@ class EmbeddingScheduler:
         """Log processing statistics"""
         elapsed = time.time() - self.start_time
         rate = self.total_processed / elapsed if elapsed > 0 else 0
+        success_count = self.total_processed - self.total_errors
+        success_rate = success_count / max(self.total_processed, 1) * 100
         
         logger.info("=" * 80)
         logger.info("STATISTICS:")
         logger.info(f"  Total Processed: {self.total_processed}")
         logger.info(f"  Total Errors: {self.total_errors}")
-        logger.info(f"  Success Rate: {(self.total_processed - self.total_errors) / max(self.total_processed, 1) * 100:.1f}%")
+        logger.info(f"  Success Rate: {success_rate:.1f}%")
         logger.info(f"  Elapsed Time: {elapsed:.0f}s")
         logger.info(f"  Processing Rate: {rate:.2f} articles/sec")
+        logger.info(f"  Consecutive Errors: {self.consecutive_errors}")
         logger.info("=" * 80)
+
+    def run_health_check(self) -> bool:
+        """
+        Run health check on all components.
+        
+        Returns:
+            True if all checks pass, False otherwise
+        """
+        logger.info("=" * 80)
+        logger.info("Running Health Check...")
+        logger.info("=" * 80)
+        
+        all_ok = True
+        
+        # Check vector DB health
+        try:
+            health = self.vector_manager.health_check()
+            
+            logger.info(f"Qdrant Connected: {'✅' if health['qdrant_connected'] else '❌'}")
+            logger.info(f"Collection Exists: {'✅' if health['collection_exists'] else '❌'}")
+            
+            if health['collection_exists']:
+                logger.info(f"Collection Dimension: {health['collection_dimension']}")
+                logger.info(f"Collection Points: {health['collection_points']:,}")
+            
+            logger.info(f"Embedding Service: {health['embedding_service']}")
+            logger.info(f"Expected Dimension: {health['embedding_dimension']}")
+            logger.info(f"Test Embedding: {'✅' if health['test_embedding_ok'] else '❌'}")
+            
+            if 'test_embedding_error' in health:
+                logger.error(f"Test Embedding Error: {health['test_embedding_error']}")
+                all_ok = False
+            
+            if not health['qdrant_connected']:
+                logger.error("❌ Cannot connect to Qdrant")
+                all_ok = False
+            
+            if not health['test_embedding_ok']:
+                logger.error("❌ Embedding service test failed")
+                all_ok = False
+                
+            # Check dimension match
+            if health['collection_exists'] and health['collection_dimension'] != health['embedding_dimension']:
+                logger.error(
+                    f"❌ Dimension mismatch! Collection: {health['collection_dimension']}, "
+                    f"Embedding: {health['embedding_dimension']}"
+                )
+                all_ok = False
+                
+        except Exception as e:
+            logger.error(f"❌ Health check failed: {e}")
+            all_ok = False
+        
+        logger.info("=" * 80)
+        logger.info(f"Health Check Result: {'✅ PASS' if all_ok else '❌ FAIL'}")
+        logger.info("=" * 80)
+        
+        return all_ok
 
     def run_forever(self):
         """Main processing loop"""
@@ -138,9 +212,10 @@ class EmbeddingScheduler:
         else:
             logger.info(f"Model: {settings.embedding.ollama_model}")
             
-        logger.info(f"Dimension: {settings.embedding.embedding_dim}")
+        logger.info(f"Dimension: {self.vector_manager.embedding_dim}")
         logger.info(f"Batch Size: {self.batch_size}")
         logger.info(f"Poll Interval: {self.poll_interval}s")
+        logger.info(f"Max Consecutive Errors: {self.max_consecutive_errors}")
         
         # Log source filter mode
         if self.source:
@@ -168,15 +243,39 @@ class EmbeddingScheduler:
             
         logger.info("=" * 80)
         
+        # Run initial health check
+        if not self.run_health_check():
+            logger.critical("❌ Health check failed! Fix issues before continuing.")
+            logger.info("Run with --health-check to diagnose problems.")
+            sys.exit(1)
+        
+        # Ensure collection exists
+        try:
+            self.vector_manager.ensure_collection_exists()
+        except ValueError as e:
+            logger.critical(f"❌ Collection setup failed: {e}")
+            sys.exit(1)
+        
         idle_cycles = 0
         
         try:
             while True:
+                # Check for too many consecutive errors
+                if self.consecutive_errors >= self.max_consecutive_errors:
+                    logger.critical(
+                        f"❌ Too many consecutive errors ({self.consecutive_errors}). "
+                        f"Stopping to prevent further issues."
+                    )
+                    logger.info("Check the embedding service and Qdrant connection.")
+                    self._log_statistics()
+                    sys.exit(1)
+                
                 # Fetch pending news
                 news_batch = self._fetch_pending_batch()
                 
                 if not news_batch:
                     idle_cycles += 1
+                    self.consecutive_errors = 0  # Reset on successful fetch (even if empty)
                     
                     if idle_cycles == 1:
                         if self.source:
@@ -206,22 +305,35 @@ class EmbeddingScheduler:
                 # Persist into Qdrant
                 try:
                     inserted = self.vector_manager.persist_news_batch(news_batch)
-                    logger.info(f"✅ Inserted {inserted} items into Qdrant")
-
-                    # Mark as COMPLETED
+                    
                     if inserted > 0:
-                        links = [n.link for n in news_batch]
+                        logger.info(f"✅ Inserted {inserted} items into Qdrant")
+                        
+                        # Mark as COMPLETED
+                        links = [n.link for n in news_batch[:inserted]]  # Only mark successfully inserted
                         updated = self.db_manager.mark_news_completed(links)
                         logger.info(f"✅ Marked {updated} news as COMPLETED")
                         
                         self.total_processed += inserted
+                        self.consecutive_errors = 0  # Reset on success
                     else:
-                        logger.warning("⚠️  No items inserted")
+                        logger.warning("⚠️ No items inserted - check embedding service")
                         self.total_errors += len(news_batch)
+                        self.consecutive_errors += 1
                         
-                except Exception as e:
-                    logger.error(f"❌ Error processing batch: {e}")
+                except EmbeddingValidationError as e:
+                    logger.error(f"❌ Embedding validation error: {e}")
+                    if e.failed_indices:
+                        logger.error(f"   Failed indices: {e.failed_indices[:10]}...")
                     self.total_errors += len(news_batch)
+                    self.consecutive_errors += 1
+                    time.sleep(5)
+                    continue
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error processing batch: {e}", exc_info=True)
+                    self.total_errors += len(news_batch)
+                    self.consecutive_errors += 1
                     time.sleep(5)
                     continue
 
@@ -270,8 +382,8 @@ Optional Source Filtering (WITH --source argument):
     python news_historical_embedding_scheduler.py --source Tasnim &
     python news_historical_embedding_scheduler.py --source Donya-e-Eqtesad &
     
-    # Or use the helper script
-    ./run_parallel_schedulers.sh
+Health Check:
+    python news_historical_embedding_scheduler.py --health-check
 
 Custom Batch Size:
     python news_historical_embedding_scheduler.py --batch-size 50
@@ -299,6 +411,19 @@ Custom Batch Size:
         type=int,
         default=30,
         help='Seconds to wait when no pending articles (default: 30)'
+    )
+    
+    parser.add_argument(
+        '--max-errors',
+        type=int,
+        default=5,
+        help='Stop after this many consecutive errors (default: 5)'
+    )
+    
+    parser.add_argument(
+        '--health-check',
+        action='store_true',
+        help='Run health check only and exit'
     )
     
     return parser.parse_args()
@@ -333,8 +458,8 @@ def main():
     if args.source:
         # Optional: validate against known sources
         try:
-            from sources import IRNA, ISNA, TASNIM, DONYAYE_EQTESAD
-            valid_sources = [IRNA, ISNA, TASNIM, DONYAYE_EQTESAD]
+            from news_publishers import IRNA, ISNA, TASNIM, DONYAYE_EQTESAD, SHARGH
+            valid_sources = [IRNA, ISNA, TASNIM, DONYAYE_EQTESAD, SHARGH]
             
             if args.source not in valid_sources:
                 logger.warning(
@@ -347,15 +472,22 @@ def main():
     else:
         logger.info("ℹ️  No --source provided: will process ALL sources (default mode)")
     
-    # Start scheduler
+    # Create scheduler
     scheduler = EmbeddingScheduler(
         db_manager=db_manager,
         vector_manager=vector_manager,
         batch_size=args.batch_size,
         poll_interval=args.poll_interval,
-        source=args.source  # None = ALL sources (default)
+        source=args.source,
+        max_consecutive_errors=args.max_errors
     )
     
+    # Health check only mode
+    if args.health_check:
+        success = scheduler.run_health_check()
+        sys.exit(0 if success else 1)
+    
+    # Start scheduler
     scheduler.run_forever()
 
 

@@ -9,15 +9,25 @@ Includes:
 - Batch processing optimization
 - Parallel execution for local models
 - Prometheus metrics for monitoring
+- Robust validation to prevent empty/corrupted embeddings
+
+FIXED: Added comprehensive validation to fail fast on empty embeddings
+FIXED: Prevents dimension corruption from API failures
+FIXED: Rayen now uses direct HTTP client with SSL bypass (verify=False)
 """
 import logging
 import os
 import time
+import requests
+import urllib3
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import List, Optional
 
-from prometheus_client import Summary, Histogram
+from prometheus_client import Summary, Histogram, Counter
+
+# Suppress SSL warnings for Rayen API
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Metrics
 EMBEDDING_LATENCY = Summary(
@@ -37,6 +47,18 @@ CONCURRENT_REQUESTS = Histogram(
     ['provider'],
     buckets=[1, 2, 5, 10, 20]
 )
+EMBEDDING_FAILURES = Counter(
+    'embedding_failures_total',
+    'Total number of embedding failures',
+    ['provider', 'error_type']
+)
+
+
+class EmbeddingValidationError(Exception):
+    """Raised when embedding validation fails"""
+    def __init__(self, message: str, failed_indices: Optional[List[int]] = None):
+        super().__init__(message)
+        self.failed_indices = failed_indices or []
 
 
 class EmbeddingService(ABC):
@@ -57,6 +79,9 @@ class EmbeddingService(ABC):
 
         Returns:
             List of embedding vectors
+
+        Raises:
+            EmbeddingValidationError: If embeddings are empty or have wrong dimensions
         """
         pass
 
@@ -69,6 +94,69 @@ class EmbeddingService(ABC):
     def get_provider_name(self) -> str:
         """Return the provider name for logging/metrics"""
         pass
+
+    def _validate_embeddings(
+        self,
+        vectors: List[List[float]],
+        expected_count: int,
+        expected_dim: int,
+        provider: str
+    ) -> None:
+        """
+        Validate embeddings meet expected criteria.
+        
+        Args:
+            vectors: List of embedding vectors to validate
+            expected_count: Expected number of vectors
+            expected_dim: Expected dimension of each vector
+            provider: Provider name for error messages
+            
+        Raises:
+            EmbeddingValidationError: If validation fails
+        """
+        # Check we got any vectors at all
+        if vectors is None:
+            EMBEDDING_FAILURES.labels(provider=provider, error_type='null_response').inc()
+            raise EmbeddingValidationError(
+                f"{provider} returned None instead of embeddings"
+            )
+        
+        # Check count matches
+        if len(vectors) != expected_count:
+            EMBEDDING_FAILURES.labels(provider=provider, error_type='count_mismatch').inc()
+            raise EmbeddingValidationError(
+                f"{provider} returned {len(vectors)} vectors for {expected_count} texts"
+            )
+        
+        # Check each vector for validity
+        failed_indices = []
+        wrong_dim_indices = []
+        
+        for i, vec in enumerate(vectors):
+            if vec is None or not isinstance(vec, (list, tuple)):
+                failed_indices.append(i)
+            elif len(vec) == 0:
+                failed_indices.append(i)
+            elif len(vec) != expected_dim:
+                wrong_dim_indices.append((i, len(vec)))
+        
+        # Report empty embeddings
+        if failed_indices:
+            EMBEDDING_FAILURES.labels(provider=provider, error_type='empty_embedding').inc()
+            raise EmbeddingValidationError(
+                f"{provider} returned empty/null embeddings for {len(failed_indices)} texts. "
+                f"Failed indices: {failed_indices[:20]}{'...' if len(failed_indices) > 20 else ''}",
+                failed_indices=failed_indices
+            )
+        
+        # Report dimension mismatches
+        if wrong_dim_indices:
+            EMBEDDING_FAILURES.labels(provider=provider, error_type='dimension_mismatch').inc()
+            sample = wrong_dim_indices[:5]
+            raise EmbeddingValidationError(
+                f"{provider} returned vectors with wrong dimensions. "
+                f"Expected {expected_dim}, got: {sample}{'...' if len(wrong_dim_indices) > 5 else ''}"
+            )
 
 
 class OpenAIEmbeddingService(EmbeddingService):
@@ -126,8 +214,8 @@ class OpenAIEmbeddingService(EmbeddingService):
         if not texts:
             return []
 
-        # Filter out empty strings
-        non_empty_texts = [text for text in texts if text.strip()]
+        # Filter out empty strings and track original indices
+        non_empty_texts = [text for text in texts if text and text.strip()]
         if not non_empty_texts:
             return []
 
@@ -137,15 +225,19 @@ class OpenAIEmbeddingService(EmbeddingService):
             # OpenAI API handles batching efficiently internally
             vectors = self.embeddings.embed_documents(non_empty_texts)
 
-            # Validate dimensions
-            for vector in vectors:
-                if len(vector) != self.dimension:
-                    raise ValueError(
-                        f"Expected dimension {self.dimension}, got {len(vector)}"
-                    )
+            # Validate embeddings
+            self._validate_embeddings(
+                vectors=vectors,
+                expected_count=len(non_empty_texts),
+                expected_dim=self.dimension,
+                provider='openai'
+            )
 
             return vectors
+        except EmbeddingValidationError:
+            raise
         except Exception as e:
+            EMBEDDING_FAILURES.labels(provider='openai', error_type='api_error').inc()
             self.logger.error(f"OpenAI embedding generation failed: {e}")
             raise
 
@@ -159,8 +251,17 @@ class OpenAIEmbeddingService(EmbeddingService):
 class RayenEmbeddingService(EmbeddingService):
     """
     Rayen AI embedding service.
-    Uses OpenAI-compatible API protocol but points to Rayen's custom infrastructure.
+    Uses direct HTTP requests with SSL verification disabled.
+    
+    FIXED: Now uses requests library directly instead of LangChain
+           to properly handle verify=False for SSL bypass.
     """
+
+    # Known Rayen model dimensions
+    KNOWN_DIMENSIONS = {
+        "rayen-bert": 768,
+        "rayen-multilingual": 768,
+    }
 
     def __init__(
         self,
@@ -169,7 +270,9 @@ class RayenEmbeddingService(EmbeddingService):
         model_name: str,
         logger: logging.Logger,
         max_workers: int = 10,
-        chunk_size: int = 5
+        chunk_size: int = 5,
+        timeout: int = 60,
+        max_batch_size: int = 100
     ):
         super().__init__(logger, max_workers, chunk_size)
 
@@ -178,64 +281,253 @@ class RayenEmbeddingService(EmbeddingService):
         if not base_url:
             raise ValueError("Rayen Base URL is required")
 
-        # Reuse LangChain's OpenAI client because Rayen API is compatible
-        try:
-            from langchain_openai import OpenAIEmbeddings
-        except ImportError:
-            raise ImportError(
-                "langchain-openai not installed. Run: pip install langchain-openai"
-            )
-
+        self.api_key = api_key
+        self.base_url = base_url.rstrip('/')
         self.model_name = model_name
+        self.timeout = timeout
+        self.max_batch_size = max_batch_size
+        
+        # Setup session with retry
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "accept": "*/*"
+        })
 
-        # Initialize client pointing to custom Rayen URL
-        self.embeddings = OpenAIEmbeddings(
-            model=model_name,
-            openai_api_key=api_key,
-            openai_api_base=base_url,  # Points to https://gw.rayenai.ir/v1
-            check_embedding_ctx_length=False  # Custom models might not report context length standardly
-        )
-
-        # Standard BERT dimension (typically 768)
-        self.dimension = 768
+        # Detect actual dimension via test embedding
+        self.dimension = self._detect_dimension()
 
         self.logger.info(
             f"✅ Rayen AI Embedding Service initialized: "
             f"URL={base_url}, model={model_name}, dim={self.dimension}"
         )
 
+    def _make_request(self, texts: List[str]) -> List[List[float]]:
+        """
+        Make a direct HTTP request to Rayen API with SSL bypass.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        url = f"{self.base_url}/embeddings"
+        
+        # ALWAYS send as list for consistent response handling
+        payload = {
+            "model": self.model_name,
+            "input": texts  # Always send as list
+        }
+        
+        self.logger.debug(f"Rayen request: {len(texts)} texts, first={texts[0][:50] if texts else 'N/A'}...")
+        
+        try:
+            response = self.session.post(
+                url,
+                json=payload,
+                verify=False,  # SSL bypass - required for Rayen
+                timeout=self.timeout
+            )
+            
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Rayen API returned status {response.status_code}: {response.text}"
+                )
+            
+            data = response.json()
+            
+            # Parse response - OpenAI compatible format
+            if 'data' not in data:
+                raise RuntimeError(f"Rayen API response missing 'data' field: {data}")
+            
+            embeddings_data = data['data']
+            
+            self.logger.debug(
+                f"Rayen response: {len(embeddings_data)} items returned for {len(texts)} texts"
+            )
+            
+            # Sort by index to maintain order
+            embeddings_data = sorted(embeddings_data, key=lambda x: x.get('index', 0))
+            
+            # Extract embeddings with validation
+            vectors = []
+            for i, item in enumerate(embeddings_data):
+                emb = item.get('embedding', [])
+                if not emb:
+                    self.logger.error(
+                        f"❌ Empty embedding at index {i}! Item keys: {item.keys()}, "
+                        f"index={item.get('index')}, object={item.get('object')}"
+                    )
+                vectors.append(emb)
+            
+            # CRITICAL: Validate count matches
+            if len(vectors) != len(texts):
+                self.logger.error(
+                    f"❌ COUNT MISMATCH: Rayen returned {len(vectors)} vectors for {len(texts)} texts!"
+                )
+                # If fewer vectors returned, pad with empty (will be caught by validation)
+                while len(vectors) < len(texts):
+                    vectors.append([])
+            
+            # Check for empty vectors in response
+            empty_indices = [i for i, v in enumerate(vectors) if not v or len(v) == 0]
+            if empty_indices:
+                self.logger.error(
+                    f"❌ Rayen returned {len(empty_indices)} empty embeddings!\n"
+                    f"   Empty indices: {empty_indices[:20]}"
+                )
+                # Log the texts that failed
+                for idx in empty_indices[:5]:
+                    if idx < len(texts):
+                        text_sample = texts[idx][:100].replace('\n', ' ')
+                        self.logger.error(
+                            f"   Text[{idx}] (len={len(texts[idx])}): '{text_sample}'"
+                        )
+                
+                # Raise immediately to prevent corrupt data
+                raise EmbeddingValidationError(
+                    f"Rayen returned {len(empty_indices)} empty embeddings",
+                    failed_indices=empty_indices
+                )
+            
+            # Validate dimensions
+            wrong_dim = [(i, len(v)) for i, v in enumerate(vectors) if len(v) != self.dimension]
+            if wrong_dim:
+                self.logger.error(f"❌ Wrong dimensions detected: {wrong_dim[:10]}")
+                raise EmbeddingValidationError(
+                    f"Rayen returned vectors with wrong dimensions: {wrong_dim[:5]}"
+                )
+            
+            self.logger.debug(f"✅ Rayen request successful: {len(vectors)} valid vectors")
+            return vectors
+            
+        except requests.exceptions.Timeout:
+            raise RuntimeError(f"Rayen API request timed out after {self.timeout}s")
+        except requests.exceptions.ConnectionError as e:
+            raise RuntimeError(f"Rayen API connection error: {e}")
+        except EmbeddingValidationError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Rayen API request failed: {e}")
+            raise RuntimeError(f"Rayen API request failed: {e}")
+
+    def _detect_dimension(self) -> int:
+        """
+        Detect embedding dimension by generating a test embedding.
+        Falls back to known dimensions if test fails.
+        """
+        try:
+            self.logger.info("Detecting Rayen embedding dimension via test embedding...")
+            vectors = self._make_request(["تست"])
+            
+            if not vectors or len(vectors) == 0:
+                raise ValueError("Test embedding returned empty result")
+            
+            test_dim = len(vectors[0])
+            
+            if test_dim == 0:
+                raise ValueError("Test embedding has zero dimension")
+            
+            self.logger.info(f"✅ Rayen dimension detected: {test_dim}")
+            return test_dim
+            
+        except Exception as e:
+            self.logger.warning(f"Could not detect dimension via test: {e}")
+            
+            # Fallback to known dimensions
+            fallback_dim = self.KNOWN_DIMENSIONS.get(self.model_name, 768)
+            self.logger.warning(f"Using fallback dimension: {fallback_dim}")
+            return fallback_dim
+
+    def _verify_api_health(self) -> bool:
+        """Quick health check for Rayen API"""
+        try:
+            vectors = self._make_request(["health check"])
+            return vectors is not None and len(vectors) > 0 and len(vectors[0]) > 0
+        except Exception:
+            return False
+
     @EMBEDDING_LATENCY.labels(provider='rayen').time()
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings using Rayen API.
+        Generate embeddings using Rayen API with comprehensive validation.
+        
+        Handles batching for large requests and validates all results.
         """
         if not texts:
             return []
 
-        non_empty_texts = [text for text in texts if text.strip()]
+        # Filter and log
+        original_count = len(texts)
+        non_empty_texts = [text for text in texts if text and text.strip()]
+        filtered_count = original_count - len(non_empty_texts)
+        
+        if filtered_count > 0:
+            self.logger.warning(
+                f"Filtered out {filtered_count} empty/whitespace texts from batch of {original_count}"
+            )
+        
         if not non_empty_texts:
+            self.logger.warning("All texts were empty after filtering!")
             return []
 
         EMBEDDING_BATCH_SIZE.labels(provider='rayen').observe(len(non_empty_texts))
+        
+        self.logger.info(
+            f"📤 Sending {len(non_empty_texts)} texts to Rayen API "
+            f"(batch_size={self.max_batch_size})"
+        )
 
         try:
-            # The API supports batching, so we send the list directly
-            vectors = self.embeddings.embed_documents(non_empty_texts)
-
-            # Dynamic dimension check (on first successful batch)
-            # This handles cases where the model dimension might not be exactly 768
-            if vectors and len(vectors) > 0:
-                actual_dim = len(vectors[0])
-                if actual_dim != self.dimension:
-                    self.logger.warning(
-                        f"Rayen dimension mismatch. Expected {self.dimension}, got {actual_dim}. "
-                        "Updating internal dimension."
+            # Process in batches if too large
+            if len(non_empty_texts) > self.max_batch_size:
+                all_vectors = []
+                num_batches = (len(non_empty_texts) + self.max_batch_size - 1) // self.max_batch_size
+                
+                for batch_idx, i in enumerate(range(0, len(non_empty_texts), self.max_batch_size)):
+                    batch = non_empty_texts[i:i + self.max_batch_size]
+                    self.logger.info(
+                        f"  Processing batch {batch_idx + 1}/{num_batches} ({len(batch)} texts)"
                     )
-                    self.dimension = actual_dim
-
+                    
+                    batch_vectors = self._make_request(batch)
+                    all_vectors.extend(batch_vectors)
+                    
+                    # Brief pause between batches to avoid rate limiting
+                    if i + self.max_batch_size < len(non_empty_texts):
+                        time.sleep(0.2)
+                
+                vectors = all_vectors
+            else:
+                vectors = self._make_request(non_empty_texts)
+            
+            # Final validation (should already be done in _make_request, but double-check)
+            self._validate_embeddings(
+                vectors=vectors,
+                expected_count=len(non_empty_texts),
+                expected_dim=self.dimension,
+                provider='rayen'
+            )
+            
+            self.logger.info(f"✅ Successfully generated {len(vectors)} embeddings")
             return vectors
+            
+        except EmbeddingValidationError as e:
+            self.logger.error(
+                f"❌ Rayen embedding validation failed: {e}\n"
+                f"   Failed indices: {e.failed_indices[:10] if e.failed_indices else 'N/A'}"
+            )
+            raise
         except Exception as e:
-            self.logger.error(f"Rayen embedding generation failed: {e}")
+            EMBEDDING_FAILURES.labels(provider='rayen', error_type='api_error').inc()
+            self.logger.error(f"❌ Rayen embedding generation failed: {e}")
+            
+            # Check if API is healthy
+            if not self._verify_api_health():
+                self.logger.error("⚠️ Rayen API health check failed - service may be down")
+            
             raise
 
     def get_dimension(self) -> int:
@@ -320,6 +612,10 @@ class OllamaEmbeddingService(EmbeddingService):
                 prompt="test"
             )
             test_embedding = test_response['embedding']
+            
+            if not test_embedding or len(test_embedding) == 0:
+                raise ValueError("Test embedding returned empty result")
+                
             return len(test_embedding)
         except Exception as e:
             self.logger.warning(
@@ -347,13 +643,20 @@ class OllamaEmbeddingService(EmbeddingService):
             )
             embedding = response['embedding']
 
-            # Validate dimension
+            # Validate embedding
+            if not embedding or len(embedding) == 0:
+                raise EmbeddingValidationError(
+                    f"Ollama returned empty embedding for text"
+                )
+            
             if len(embedding) != self.dimension:
-                raise ValueError(
+                raise EmbeddingValidationError(
                     f"Expected dimension {self.dimension}, got {len(embedding)}"
                 )
 
             return embedding
+        except EmbeddingValidationError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to embed text: {e}")
             raise
@@ -370,7 +673,7 @@ class OllamaEmbeddingService(EmbeddingService):
             return []
 
         # Filter out empty strings
-        non_empty_texts = [text for text in texts if text.strip()]
+        non_empty_texts = [text for text in texts if text and text.strip()]
         if not non_empty_texts:
             return []
 
@@ -381,6 +684,7 @@ class OllamaEmbeddingService(EmbeddingService):
         # Create a mapping to preserve order
         text_to_index = {i: text for i, text in enumerate(non_empty_texts)}
         embeddings = [None] * len(non_empty_texts)
+        failed_indices = []
 
         # Use ThreadPoolExecutor for concurrent processing
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -411,7 +715,24 @@ class OllamaEmbeddingService(EmbeddingService):
                         )
                 except Exception as e:
                     self.logger.error(f"Failed to get embedding for index {idx}: {e}")
-                    raise
+                    failed_indices.append(idx)
+
+        # Check for failures
+        if failed_indices:
+            EMBEDDING_FAILURES.labels(provider='ollama', error_type='batch_failure').inc()
+            raise EmbeddingValidationError(
+                f"Ollama failed to generate embeddings for {len(failed_indices)} texts. "
+                f"Failed indices: {failed_indices[:20]}{'...' if len(failed_indices) > 20 else ''}",
+                failed_indices=failed_indices
+            )
+
+        # Final validation
+        self._validate_embeddings(
+            vectors=embeddings,
+            expected_count=len(non_empty_texts),
+            expected_dim=self.dimension,
+            provider='ollama'
+        )
 
         elapsed = time.time() - start_time
         rate = len(non_empty_texts) / elapsed if elapsed > 0 else 0

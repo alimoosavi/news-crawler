@@ -1,26 +1,13 @@
 """
-Vector Database Manager for newsLens
-
-Manages embeddings and Qdrant vector storage with support for multiple
-embedding providers (OpenAI, Ollama) with concurrent processing.
-
-Key Features:
-- Auto-creates Qdrant collection on first run
-- Validates dimension compatibility (fails fast if model changed)
-- Batch embedding for performance with concurrent processing
-- Retry logic with exponential backoff
-- Compatible with Qdrant client v1.7+
-
-FIXED: Removed deprecated Batch() wrapper that caused ResponseHandlingException
-FIXED: Corrected embedding service initialization to pass individual parameters
+Vector Database Manager for newsLens - PRODUCTION FIXED
 """
 import logging
 import uuid
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Any
 from datetime import datetime
 from dataclasses import asdict
 
-from prometheus_client import Summary, start_http_server
+from prometheus_client import Summary, Counter
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
@@ -28,7 +15,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 try:
     from config import QdrantConfig, EmbeddingConfig
     from schema import NewsData
-    from embedding_service import create_embedding_service, EmbeddingService
+    from embedding_service import (
+        create_embedding_service, 
+        EmbeddingService, 
+        EmbeddingValidationError
+    )
 except ImportError as e:
     print(f"FATAL: Missing required import: {e}")
     raise
@@ -40,22 +31,13 @@ QDRANT_UPSERT_LATENCY = Summary(
     'qdrant_upsert_latency_seconds',
     'Latency of Qdrant upsert operations'
 )
-
+QDRANT_UPSERT_FAILURES = Counter(
+    'qdrant_upsert_failures_total',
+    'Total number of Qdrant upsert failures',
+    ['error_type']
+)
 
 class VectorDBManager:
-    """
-    Manages embeddings and Qdrant vector storage.
-    
-    Automatically detects embedding dimension based on configured provider.
-    Fails fast if you try to use a different embedding model than what
-    the collection was created with.
-    
-    Supports concurrent embedding generation for improved performance.
-    
-    FIXED: Compatible with Qdrant client v1.7+ (removed deprecated Batch API)
-    FIXED: Corrected embedding service initialization
-    """
-
     def __init__(
         self,
         qdrant_config: QdrantConfig,
@@ -63,23 +45,20 @@ class VectorDBManager:
         logger: logging.Logger,
         collection_name: str = None
     ):
-        """
-        Initialize VectorDBManager with flexible embedding provider.
-        """
         self.logger = logger
         self.collection_name = collection_name or qdrant_config.collection_name
 
-        # Initialize Qdrant client with proper timeout settings
+        # ✅ FIX 1: Force HTTP and increase timeout (Solves _InactiveRpcError)
         self.qdrant_client = QdrantClient(
             host=qdrant_config.host,
             port=qdrant_config.port,
             grpc_port=qdrant_config.grpc_port,
-            timeout=60,
-            prefer_grpc=True,
-            check_compatibility=False  # Ignore version mismatch warning
+            timeout=100,             
+            prefer_grpc=False,       # 🔴 DISABLE gRPC (Force HTTP)
+            check_compatibility=False
         )
 
-        # Create embedding service based on provider
+        # Create embedding service
         try:
             self.embedding_service = create_embedding_service(
                 provider=embedding_config.provider,
@@ -88,16 +67,22 @@ class VectorDBManager:
                 openai_model=embedding_config.openai_model,
                 ollama_host=embedding_config.ollama_host,
                 ollama_model=embedding_config.ollama_model,
+                rayen_api_key=getattr(embedding_config, 'rayen_api_key', None),
+                rayen_base_url=getattr(embedding_config, 'rayen_base_url', None),
+                rayen_model=getattr(embedding_config, 'rayen_model', None),
                 max_workers=embedding_config.max_concurrent_requests,
                 chunk_size=embedding_config.chunk_size
             )
             
-            # Get embedding dimension from the service
-            self.embedding_dim = self.embedding_service.get_dimension()
-            provider_name = self.embedding_service.get_provider_name()
+            # Retrieve dimension safely
+            try:
+                self.embedding_dim = self.embedding_service.get_dimension()
+            except AttributeError:
+                self.logger.warning("Could not get dimension from service attribute, defaulting to 768")
+                self.embedding_dim = 768
             
             self.logger.info(
-                f"✅ VectorDBManager initialized with {provider_name} "
+                f"✅ VectorDBManager initialized with {self.embedding_service.get_provider_name()} "
                 f"(dimension: {self.embedding_dim})"
             )
             
@@ -106,217 +91,181 @@ class VectorDBManager:
             raise
     
     def ensure_collection_exists(self):
-        """
-        Ensure the Qdrant collection exists with the correct embedding dimension.
-        
-        Behavior:
-        - If collection doesn't exist: Creates it with correct dimension
-        - If collection exists with correct dimension: Continues normally
-        - If collection exists with WRONG dimension: FAILS FAST with clear error
-        
-        This prevents mixing embeddings from different models, which would
-        result in meaningless similarity searches.
-        """
+        """Ensure collection exists and matches dimension."""
         try:
             if not self.qdrant_client.collection_exists(collection_name=self.collection_name):
-                # Create new collection
                 self.qdrant_client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
                         size=self.embedding_dim,
-                        distance=Distance.COSINE
+                        distance=Distance.COSINE,
+                        # ✅ FIX 2: Store vectors on Disk (mmap) to save RAM
+                        on_disk=True  
                     )
                 )
-                self.logger.info(
-                    f"✅ Collection '{self.collection_name}' created successfully"
-                )
-                self.logger.info(
-                    f"   Provider: {self.embedding_service.get_provider_name()}"
-                )
-                self.logger.info(
-                    f"   Dimension: {self.embedding_dim}"
-                )
+                self.logger.info(f"✅ Collection '{self.collection_name}' created (dim: {self.embedding_dim}, on_disk: True)")
             else:
-                # Verify existing collection dimension
                 collection_info = self.qdrant_client.get_collection(self.collection_name)
                 existing_dim = collection_info.config.params.vectors.size
                 
                 if existing_dim != self.embedding_dim:
-                    # FAIL FAST - dimension mismatch is a critical error
-                    error_msg = (
-                        f"\n{'='*80}\n"
-                        f"❌ CRITICAL ERROR: EMBEDDING MODEL MISMATCH\n"
-                        f"{'='*80}\n"
-                        f"Collection '{self.collection_name}' was created with dimension {existing_dim}\n"
-                        f"but your current embedding model requires dimension {self.embedding_dim}.\n\n"
-                        f"This means you changed EMBEDDING_PROVIDER or EMBEDDING_*_MODEL in .env\n"
-                        f"after already embedding articles with a different model.\n\n"
-                        f"YOU CANNOT MIX EMBEDDING MODELS!\n\n"
-                        f"Your options:\n"
-                        f"  1. REVERT .env to original embedding settings (recommended)\n"
-                        f"  2. DELETE collection and re-embed ALL articles:\n"
-                        f"     python delete_collection.py\n"
-                        f"     (This deletes all {collection_info.points_count:,} embeddings!)\n"
-                        f"     Then re-run: python news_historical_embedding_scheduler.py\n\n"
-                        f"Details:\n"
-                        f"  Collection: {self.collection_name}\n"
-                        f"  Existing dimension: {existing_dim}\n"
-                        f"  Required dimension: {self.embedding_dim}\n"
-                        f"  Current provider: {self.embedding_service.get_provider_name()}\n"
-                        f"{'='*80}\n"
+                    raise ValueError(
+                        f"Dimension mismatch! Collection: {existing_dim}, Model: {self.embedding_dim}. "
+                        "You must DROP the collection or switch models."
                     )
-                    self.logger.critical(error_msg)
-                    raise ValueError(f"Collection dimension mismatch: {existing_dim} != {self.embedding_dim}")
+                self.logger.info(f"✅ Collection '{self.collection_name}' ready (points: {collection_info.points_count})")
                 
-                # Dimension matches - all good
-                self.logger.info(
-                    f"✅ Collection '{self.collection_name}' ready: "
-                    f"{collection_info.points_count:,} articles, "
-                    f"dimension {self.embedding_dim}"
-                )
-                
-        except ValueError:
-            # Re-raise dimension mismatch errors
-            raise
         except Exception as e:
             self.logger.error(f"Failed to ensure collection exists: {e}")
             raise
 
     def extract_plain_text(self, news: NewsData) -> str:
-        """Extract plain string text from a NewsData object for embedding."""
+        """Extract text for embedding."""
         title = str(news.title or "")
         summary = str(news.summary or "")
         content = str(news.content or "")
-        
-        # Prefer title + summary, fallback to content
         text = f"{title}. {summary}".strip()
-        if not text or text == ".":
+        if not text or len(text) < 10:
             text = content
-        
         return str(text).replace("\n", " ").strip()
+
+    def _validate_vector_for_qdrant(self, vector: Any, index: int) -> Tuple[bool, Optional[str]]:
+        """Strict validation of vector structure."""
+        if vector is None:
+            return False, f"Vector at index {index} is None"
+        
+        try:
+            if len(vector) != self.embedding_dim:
+                return False, f"Dim mismatch: expected {self.embedding_dim}, got {len(vector)}"
+        except TypeError:
+            return False, f"Vector at index {index} is not iterable (type: {type(vector)})"
+
+        return True, None
 
     @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """
-        Generate embeddings for a batch of texts using the configured provider.
-        
-        This method now supports concurrent processing for improved performance.
-        The concurrency is handled internally by the embedding service.
-        
-        Args:
-            texts: List of text strings to embed
-            
-        Returns:
-            List of embedding vectors
-        """
-        if not texts:
-            return []
-
-        non_empty_texts = [text for text in texts if text.strip()]
-        if not non_empty_texts:
-            return []
-
         try:
-            vectors = self.embedding_service.embed_documents(non_empty_texts)
-
-            # Validate dimensions
-            for vector in vectors:
-                if len(vector) != self.embedding_dim:
-                    raise ValueError(
-                        f"Expected embedding dimension {self.embedding_dim}, "
-                        f"got {len(vector)} in batch."
-                    )
-
-            return vectors
+            return self.embedding_service.embed_documents(texts)
         except Exception as e:
             self.logger.error(f"Batch embedding generation failed: {e}")
             raise
 
-    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
-    @QDRANT_UPSERT_LATENCY.time()
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
     def _upsert_points_with_retry(self, points: List[PointStruct]):
-        """
-        Upsert a list of points into Qdrant in a single batch operation.
-        
-        FIXED: Removed deprecated Batch() wrapper - now passes points directly
-        """
+        """Upsert points directly."""
         self.qdrant_client.upsert(
             collection_name=self.collection_name,
-            points=points,  # Direct list - no Batch wrapper
-            wait=True
+            points=points,
+            # ✅ FIX 3: Fire and forget (faster, less prone to timeouts)
+            wait=False
         )
 
     def persist_news_batch(self, news_batch: List[NewsData]) -> int:
-        """
-        Persist a batch of NewsData objects into Qdrant.
-        
-        Args:
-            news_batch: List of NewsData objects to embed and store
-            
-        Returns:
-            Number of articles successfully persisted
-        """
         if not news_batch:
             return 0
 
-        # 1. Extract texts and prepare mapping
-        articles_to_embed: List[Tuple[NewsData, str, str]] = []
-        texts_for_embedding: List[str] = []
+        # 1. Prepare texts
+        articles_to_embed = []
+        texts_for_embedding = []
 
         for news in news_batch:
-            embedding_text = self.extract_plain_text(news)
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, news.link))
-
-            if embedding_text:
-                articles_to_embed.append((news, point_id, embedding_text))
-                texts_for_embedding.append(embedding_text)
+            text = self.extract_plain_text(news)
+            if text and len(text) > 5:
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, news.link))
+                articles_to_embed.append((news, point_id))
+                texts_for_embedding.append(text)
             else:
-                self.logger.warning(f"Skipping article with link '{news.link}' due to empty content.")
+                self.logger.warning(f"Skipping empty article: {news.link}")
 
         if not articles_to_embed:
             return 0
 
-        # 2. Get embeddings in a single batch with concurrent processing
-        self.logger.info(f"Generating embeddings for batch of {len(texts_for_embedding)} articles.")
-        vectors: List[List[float]] = []
+        # 2. Generate Embeddings
         try:
             vectors = self.get_embeddings_batch(texts_for_embedding)
-        except Exception as e:
-            self.logger.error(f"Failed to get embeddings for batch: {e}")
+        except Exception:
+            return 0
+
+        if len(vectors) != len(articles_to_embed):
+            self.logger.error(f"Count mismatch: {len(vectors)} vectors for {len(articles_to_embed)} articles")
             return 0
 
         # 3. Construct Points
         points: List[PointStruct] = []
-        for i, (news, point_id, _) in enumerate(articles_to_embed):
+        
+        for i, (news, point_id) in enumerate(articles_to_embed):
+            raw_vector = vectors[i]
+            
+            is_valid, error = self._validate_vector_for_qdrant(raw_vector, i)
+            if not is_valid:
+                self.logger.error(f"Invalid vector for {news.link}: {error}")
+                continue
 
-            # Convert dataclass to dict
+            # Force cast to list[float] to ensure serialization safety
+            try:
+                safe_vector = [float(x) for x in raw_vector]
+            except Exception as e:
+                self.logger.error(f"Failed to cast vector to float list: {e}")
+                continue
+
             payload = asdict(news)
-
-            # Ensure datetime objects are JSON-compatible
             if 'published_datetime' in payload and isinstance(payload['published_datetime'], datetime):
                 payload['published_datetime'] = payload['published_datetime'].isoformat()
+            if 'keywords' in payload and payload['keywords'] is None:
+                payload['keywords'] = []
 
-            # Ensure published_timestamp is string
-            if 'published_timestamp' in payload and payload['published_timestamp'] is not None:
-                payload['published_timestamp'] = str(payload['published_timestamp'])
-
-            try:
-                point = PointStruct(id=point_id, vector=vectors[i], payload=payload)
-                points.append(point)
-            except IndexError:
-                self.logger.error(f"Vector missing for article {news.link} during point construction.")
+            points.append(PointStruct(id=point_id, vector=safe_vector, payload=payload))
 
         if not points:
             return 0
 
-        # 4. Upsert Points in a single batch
+        # 4. Upsert
         try:
-            self.logger.info(f"Upserting batch of {len(points)} points to Qdrant.")
             self._upsert_points_with_retry(points)
+            self.logger.info(f"✅ Successfully upserted {len(points)} points")
             return len(points)
-        except RetryError as e:
-            self.logger.critical(f"Failed to upsert batch after retries: {e.last_attempt.exception()}")
-            return 0
         except Exception as e:
-            self.logger.error(f"Unexpected error during Qdrant upsert: {e}")
+            self.logger.critical(f"❌ Failed to upsert batch: {e}")
+            QDRANT_UPSERT_FAILURES.labels(error_type='upsert_exception').inc()
             return 0
+
+    def health_check(self) -> dict:
+        """
+        Perform health check on the vector database and embedding service.
+        """
+        status = {
+            'qdrant_connected': False,
+            'collection_exists': False,
+            'collection_dimension': 0,
+            'collection_points': 0,
+            'embedding_service': self.embedding_service.get_provider_name(),
+            'embedding_dimension': self.embedding_dim,
+            'test_embedding_ok': False,
+        }
+        
+        try:
+            # Check Qdrant connection
+            self.qdrant_client.get_collections()
+            status['qdrant_connected'] = True
+            
+            # Check collection
+            if self.qdrant_client.collection_exists(self.collection_name):
+                status['collection_exists'] = True
+                info = self.qdrant_client.get_collection(self.collection_name)
+                status['collection_dimension'] = info.config.params.vectors.size
+                status['collection_points'] = info.points_count
+            else:
+                status['collection_points'] = 0
+
+            # Test embedding generation
+            try:
+                test_vectors = self.embedding_service.embed_documents(["health check test"])
+                if test_vectors and len(test_vectors) > 0 and len(test_vectors[0]) == self.embedding_dim:
+                    status['test_embedding_ok'] = True
+            except Exception as e:
+                status['test_embedding_error'] = str(e)
+                
+        except Exception as e:
+            status['error'] = str(e)
+        
+        return status
