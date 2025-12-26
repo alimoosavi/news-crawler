@@ -6,10 +6,11 @@ Updates:
 - Configures Indexing schema at creation time.
 - Optimizes for low-RAM usage (on_disk_payload).
 - Added health_check method.
+- FIXED: Now correctly passes ALL config parameters for Rayen, Ollama, and OpenAI.
 """
 import logging
 import uuid
-from typing import List, Tuple
+from typing import List
 from datetime import datetime
 from dataclasses import asdict
 
@@ -17,12 +18,12 @@ from prometheus_client import Summary
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
-from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:
     from config import QdrantConfig, EmbeddingConfig
     from schema import NewsData
-    from embedding_service import create_embedding_service, EmbeddingService
+    from embedding_service import create_embedding_service
 except ImportError as e:
     print(f"FATAL: Missing required import: {e}")
     raise
@@ -61,17 +62,30 @@ class VectorDBManager:
         )
 
         # Initialize Embedding Service
+        # FIXED: Passing ALL config parameters so any provider (Rayen/Ollama/OpenAI) works
         try:
             self.embedding_service = create_embedding_service(
                 provider=embedding_config.provider,
                 logger=self.logger,
+                
+                # 1. OpenAI Configuration
                 openai_api_key=embedding_config.openai_api_key,
                 openai_model=embedding_config.openai_model,
+                
+                # 2. Ollama Configuration
                 ollama_host=embedding_config.ollama_host,
                 ollama_model=embedding_config.ollama_model,
+                
+                # 3. Rayen AI Configuration (Crucial Fix)
+                rayen_api_key=embedding_config.rayen_api_key,
+                rayen_base_url=embedding_config.rayen_base_url,
+                rayen_model=embedding_config.rayen_model,
+                
+                # Performance Settings
                 max_workers=embedding_config.max_concurrent_requests,
                 chunk_size=embedding_config.chunk_size
             )
+            
             self.embedding_dim = self.embedding_service.get_dimension()
             
             self.logger.info(
