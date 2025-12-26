@@ -5,6 +5,7 @@ Manages embeddings and Qdrant vector storage.
 Updates:
 - Configures Indexing schema at creation time.
 - Optimizes for low-RAM usage (on_disk_payload).
+- Added health_check method.
 """
 import logging
 import uuid
@@ -14,7 +15,7 @@ from dataclasses import asdict
 
 from prometheus_client import Summary
 from qdrant_client import QdrantClient
-from qdrant_client.http import models  # Importing models for Schema definitions
+from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
@@ -38,11 +39,6 @@ QDRANT_UPSERT_LATENCY = Summary(
 class VectorDBManager:
     """
     Manages embeddings and Qdrant vector storage.
-    
-    Features:
-    - Auto-creates collection with INDEXES for filtering (Source, Time, Keywords)
-    - Optimizes storage for low-resource environments (Disk usage preferred over RAM)
-    - Validates dimension compatibility
     """
 
     def __init__(
@@ -86,6 +82,30 @@ class VectorDBManager:
             self.logger.error(f"Failed to initialize embedding service: {e}")
             raise
     
+    def health_check(self) -> bool:
+        """
+        Performs a health check on Qdrant connection and collection status.
+        Returns True if healthy, False otherwise.
+        """
+        try:
+            # 1. Check basic connectivity
+            self.qdrant_client.get_collections()
+            
+            # 2. Check if collection exists
+            if not self.qdrant_client.collection_exists(self.collection_name):
+                self.logger.warning(f"⚠️ Health check: Collection '{self.collection_name}' does not exist.")
+                return False
+                
+            # 3. Check embedding service dimension (lightweight check)
+            if self.embedding_dim <= 0:
+                self.logger.error("❌ Health check: Invalid embedding dimension.")
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Health check failed: {e}")
+            return False
+
     def ensure_collection_exists(self):
         """
         Creates the collection if it doesn't exist, applying:
@@ -104,9 +124,7 @@ class VectorDBManager:
                         size=self.embedding_dim,
                         distance=Distance.COSINE
                     ),
-                    # Optimization: Store payload on disk to save RAM
                     on_disk_payload=True,
-                    # Optimization: Store HNSW graph on disk (slower but very RAM efficient)
                     hnsw_config=models.HnswConfigDiff(
                         on_disk=True,
                         m=16,
@@ -115,7 +133,6 @@ class VectorDBManager:
                 )
 
                 # 2. Create Indexes immediately
-                # This ensures queries like "Filter by Source" are fast from day one
                 self._create_collection_indexes()
 
                 self.logger.info(f"✅ Collection '{self.collection_name}' created and indexed.")
@@ -142,18 +159,10 @@ class VectorDBManager:
         """Defines and creates the schema indexes."""
         self.logger.info("🔹 Creating Search Indexes...")
         
-        # Index definition list
         indexes = [
-            # 1. Source: Exact match filtering (e.g. "Only IRNA")
             {"field": "source", "type": models.PayloadSchemaType.KEYWORD},
-            
-            # 2. Keywords: Array filtering (e.g. "News containing 'Economy'")
             {"field": "keywords", "type": models.PayloadSchemaType.KEYWORD},
-            
-            # 3. Published Timestamp: Range queries (e.g. "Last 24 hours") - CRITICAL for sorting
             {"field": "published_timestamp", "type": models.PayloadSchemaType.INTEGER},
-            
-            # 4. Published Datetime: String matching (ISO format)
             {"field": "published_datetime", "type": models.PayloadSchemaType.KEYWORD},
         ]
 
@@ -169,7 +178,6 @@ class VectorDBManager:
                 self.logger.warning(f"   ⚠️ Could not create index for {idx['field']}: {e}")
 
     def _handle_dimension_mismatch(self, existing_dim):
-        """Helper to raise clear error on dimension mismatch"""
         error_msg = (
             f"\n{'='*80}\n"
             f"❌ CRITICAL ERROR: EMBEDDING MODEL MISMATCH\n"
